@@ -624,33 +624,35 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         return new Rectangle(t.x + inset, t.y + inset, w, h);
     }
     private void move() {
-        // ── X axis — step 1px at a time so fast tanks can't tunnel thin walls ──
-        if (left || right) {
-            int dx = left ? -1 : 1;
-            player.direction = left ? Direction.LEFT : Direction.RIGHT;
-            for (int s = 0; s < player.speed; s++) {
-                player.x += dx;
-                clamp(player);
-                if (hitsWall(player)) { player.x -= dx; break; }
-            }
+        // Determine intended direction - preventing diagonal movement
+        Direction moveDir = null;
+        if (up)         moveDir = Direction.UP;
+        else if (down)  moveDir = Direction.DOWN;
+        else if (left)  moveDir = Direction.LEFT;
+        else if (right) moveDir = Direction.RIGHT;
+
+        if (moveDir == null) return;
+
+        // Apply movement only in the chosen cardinal direction
+        player.direction = moveDir;
+        int dx = 0, dy = 0;
+        switch (moveDir) {
+            case UP    -> dy = -1;
+            case DOWN  -> dy = 1;
+            case LEFT  -> dx = -1;
+            case RIGHT -> dx = 1;
         }
 
-        // ── Y axis ──────────────────────────────────────────────────
-        if (up || down) {
-            int dy = up ? -1 : 1;
-            player.direction = up ? Direction.UP : Direction.DOWN;
-            for (int s = 0; s < player.speed; s++) {
-                player.y += dy;
-                clamp(player);
-                if (hitsWall(player)) { player.y -= dy; break; }
+        for (int s = 0; s < player.speed; s++) {
+            player.x += dx;
+            player.y += dy;
+            clamp(player);
+            if (hitsWall(player)) {
+                player.x -= dx;
+                player.y -= dy;
+                break;
             }
         }
-
-        // Direction: last pressed wins
-        if (up)    player.direction = Direction.UP;
-        if (down)  player.direction = Direction.DOWN;
-        if (left)  player.direction = Direction.LEFT;
-        if (right) player.direction = Direction.RIGHT;
     }
 
     private void addBullet(Bullet b, int damage) {
@@ -2723,17 +2725,17 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         // Helper draws one key box
         // W key (up)
         int wKx = kx + kSz + kGap;
-        drawKeyBox(g2, wKx, ky,          kSz, "W", "↑");
-        drawKeyBox(g2, kx,  ky + kSz + kGap, kSz, "A", "←");
-        drawKeyBox(g2, wKx, ky + kSz + kGap, kSz, "S", "↓");
-        drawKeyBox(g2, kx + (kSz + kGap)*2, ky + kSz + kGap, kSz, "D", "→");
+        drawKeyBox(g2, wKx, ky,          kSz, "W", "UP");
+        drawKeyBox(g2, kx,  ky + kSz + kGap, kSz, "A", "LEFT");
+        drawKeyBox(g2, wKx, ky + kSz + kGap, kSz, "S", "DOWN");
+        drawKeyBox(g2, kx + (kSz + kGap)*2, ky + kSz + kGap, kSz, "D", "RIGHT");
 
         // Arrow keys (same layout, to the right)
         int ax = kx + (kSz + kGap) * 3 + 18;
-        drawKeyBox(g2, ax + kSz + kGap, ky,          kSz, "↑", null);
-        drawKeyBox(g2, ax,              ky + kSz + kGap, kSz, "←", null);
-        drawKeyBox(g2, ax + kSz + kGap, ky + kSz + kGap, kSz, "↓", null);
-        drawKeyBox(g2, ax + (kSz+kGap)*2, ky + kSz + kGap, kSz, "→", null);
+        drawKeyBox(g2, ax + kSz + kGap, ky,          kSz, "↑", "UP");
+        drawKeyBox(g2, ax,              ky + kSz + kGap, kSz, "←", "LEFT");
+        drawKeyBox(g2, ax + kSz + kGap, ky + kSz + kGap, kSz, "↓", "DOWN");
+        drawKeyBox(g2, ax + (kSz+kGap)*2, ky + kSz + kGap, kSz, "→", "RIGHT");
 
         g2.setColor(new Color(130,160,255));
         g2.setFont(new Font("Arial",Font.BOLD,11));
