@@ -8,7 +8,7 @@ public class Explosion {
         this.x = x;
         this.y = y;
         this.radius = 10;
-        this.maxRadius = 40;
+        this.maxRadius = 44;
         this.life = 20;
     }
 

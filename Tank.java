@@ -10,6 +10,7 @@ public class Tank {
     int maxHealth;
     boolean isPlayer;
     boolean isBoss;
+    boolean bossUnlocked = true;
     Direction direction;
     int aiMoveCounter = 0;
     int shootCounter = 0;

@@ -6,7 +6,9 @@ public class SoundManager {
     public static void playSound(String path) {
         try {
             File file = new File(path);
-            if (!file.exists()) return;
+            if (!file.exists()) {
+                return;
+            }
 
             AudioInputStream audioInput = AudioSystem.getAudioInputStream(file);
             Clip clip = AudioSystem.getClip();

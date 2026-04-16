@@ -1,0 +1,8 @@
+asda,1110
+asdasd,30
+2,20
+asd,20
+1,10
+3,10
+asdasd,0
+asdasdasd,0
