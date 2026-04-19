@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -23,39 +24,62 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
     private enum GameState {
         MENU,
         NAME_INPUT,
+
+        LB_NAME_WARN,      // warn: this name exists on leaderboard, fresh start resets run score
         TANK_SELECT,
         INSTRUCTIONS,
         LEADERBOARD,
         PLAYING,
         PAUSED,
         LEVEL_CLEARED,
-        CARD_SELECT,
+        CARD_SELECT,       // card pick before a level starts (common or rare)
         GAME_OVER,
         WIN
     }
 
+    // Whether the pending card select is a rare (post-boss) pick
+    private boolean cardSelectIsRare = false;
+    // The next level to start after a card is picked
+    private int pendingNextLevel = 1;
+
     private enum CardPower {
-        CONTINUOUS_BULLET("Continuous Bullet", "Fire much faster"),
-        FIVE_BULLET("6 Bullet", "Shoot 6 bullets at once"),
-        TRIPLE_BULLET("3 Bullet", "Shoot 3 bullets at once"),
-        QUICK_RELOAD("Quick Reload", "-1 sec reload"),
-        MAG_PLUS("Magazine +2", "2 more shots per mag"),
-        BULLET_SPEED("Bullet Speed", "Bullets move faster"),
-        BIG_BULLETS("Big Bullets", "Bigger bullets"),
-        DAMAGE_UP("Damage Up", "+6 bullet damage"),
-        MAX_HP_UP("Armor Up", "+30 max HP"),
-        FULL_REPAIR("Full Repair", "Heal to full"),
-        ENGINE_BOOST("Speed Up", "+1 move speed"),
-        SECOND_LIFE("Second Life", "Revive once");
+        // ── Common cards (appear before every level) ──────────────────
+        CONTINUOUS_BULLET("Continuous Bullet", "Hold SPACE to auto-fire", "No more tapping — hold to shoot nonstop"),
+        SIX_BULLET("6-Way Shot", "Fire 6 bullets at once", "Covers a wide spread — great for crowds"),
+        TRIPLE_BULLET("3-Way Shot", "Fire 3 bullets at once", "Cone spread — upgrades to 6-Way if you find it"),  // removed from pool once SIX_BULLET owned
+        HEAVY_SHOT("Heavy Shot", "+15 dmg & bigger bullets", "Stacks! Best damage card in the pool"),
+        QUICK_RELOAD("Quick Reload", "Cut reload time by 1s", "One-time pick — brings reload to its minimum speed"),
+        MAG_PLUS("Magazine +2", "+2 to your current mag size", "Stacks! Each pick adds 2 more shots to your mag"),
+        BULLET_SPEED("Bullet Speed", "Bullets move faster", "Stacks! Harder for enemies to dodge"),
+        BIG_BULLETS("Big Bullets", "Larger bullet hitbox", "Stacks! Easier to hit — pairs well with spread shots"),
+        DAMAGE_UP("Damage Up", "+6 bullet damage", "Stacks every pick — great to grab multiple times"),
+        MAX_HP_UP("Armor Up", "+30 max HP (permanent)", "Stacks! Permanently increases your max HP by 30 each pick"),
+        BATTLE_MEDIC("Battle Medic", "+50 max HP (permanent)", "Stacks! Permanently increases your max HP by 50 each pick"),
+        ENGINE_BOOST("Speed Up", "+1 move speed", "Stacks! Makes dodging much easier"),
+        SECOND_LIFE("Second Life", "Auto-revive once on death", "Triggers automatically — restores 50% HP & full ammo"),
+        // ── Rare cards (reward for defeating a boss) ──────────────────
+        RARE_DOUBLE_DAMAGE("RARE: Double Damage", "All bullet damage ×2!", "Applies to your current damage — massive upgrade"),
+        RARE_DOUBLE_HP("RARE: Iron Fortress", "Max HP doubled!", "Your HP cap permanently doubles — massive survivability boost"),
+        RARE_DOUBLE_SCORE("RARE: Score Surge", "All score gains ×2", "Every kill earns double points for the rest of the run"),
+        RARE_GHOST_RELOAD("RARE: Infinite Mag", "Magazine size ×3!", "Triples your current mag cap — rarely need to reload"),
+        RARE_SLOW_ENEMIES("RARE: Time Warp", "Enemies 50% slower", "Permanent for this run — makes everything way easier"),
+        RARE_RAPID_FIRE("RARE: Gatling Mode", "Auto-fire at triple speed", "Hold SPACE to unload — best fire rate possible");
 
         final String title;
         final String desc;
+        final String detail;
 
-        CardPower(String title, String desc) {
-            this.title = title;
-            this.desc = desc;
+        CardPower(String title, String desc, String detail) {
+            this.title  = title;
+            this.desc   = desc;
+            this.detail = detail;
         }
     }
+
+    // Tracks whether RARE_DOUBLE_SCORE is active (score multiplier)
+    private int scoreMultiplier = 1;
+    // Tracks whether RARE_SLOW_ENEMIES is active
+    private boolean enemySlowActive = false;
 
     // ══════════════════════════════════════════════════════════════
     //  LAYOUT
@@ -110,6 +134,7 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
 
     // cards
     private final ArrayList<CardPower> offeredCards = new ArrayList<>();
+    private final HashSet<CardPower> pickedCards = new HashSet<>();  // cards already chosen (won't reappear)
     private final Rectangle[] cardRects = {
             new Rectangle(), new Rectangle(), new Rectangle()
     };
@@ -123,6 +148,8 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
     private String playerName = "";
     private String nameErrorMsg = "";
     private boolean scoreSaved = false;
+
+    private int lbExistingScore = 0;                     // LB best score shown in LB_NAME_WARN screen
 
     private GameState gameState = GameState.MENU;
     private final Random random = new Random();
@@ -168,7 +195,10 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
 
     // menu buttons
     private final Rectangle startBtn  = new Rectangle(0, 0, 200, 46);
-    private final Rectangle lboardBtn = new Rectangle(0, 0, 200, 46);
+    private final Rectangle lboardBtn    = new Rectangle(0, 0, 200, 46);
+    private final Rectangle lbWarnYesRect = new Rectangle();
+    private final Rectangle lbWarnNoRect  = new Rectangle();
+    private final Rectangle fsBtn     = new Rectangle(0, 0, 26, 22); // fullscreen toggle in top bar
     private final Rectangle instrBtn  = new Rectangle(0, 0, 200, 46);
     private final Rectangle exitBtn   = new Rectangle(0, 0, 200, 46);
 
@@ -264,9 +294,12 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
     }
 
     private int getEnemySpeedForLevel(int n) {
-        if (isEasyLevel(n))   return 2;
-        if (isMediumLevel(n)) return 3;
-        return 4;
+        int base;
+        if (isEasyLevel(n))   base = 2;
+        else if (isMediumLevel(n)) base = 3;
+        else base = 4;
+        // RARE Time Warp card: halve enemy speed (minimum 1)
+        return enemySlowActive ? Math.max(1, base / 2) : base;
     }
 
     private int getEnemyHealthForLevel(int n) {
@@ -328,7 +361,7 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         playerAmmo               = PLAYER_MAG_SIZE_DEFAULT;
         playerReloadTimer        = 0;
         playerReloadFrames       = BASE_RELOAD_FRAMES;
-        playerMoveSpeedStat      = 4;
+        playerMoveSpeedStat      = 6;   // 6px/frame compensates for cardinal-only movement
         playerMaxHealthStat      = 100;
         playerShotCooldownFrames = 12;
         playerBulletPattern      = 1;
@@ -341,6 +374,9 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         scoreSaved               = false;
         retriesLeft              = 3;
         isRetrying               = false;
+        scoreMultiplier          = 1;
+        enemySlowActive          = false;
+        pickedCards.clear();  // reset non-stackable card memory on new game
     }
 
     private void startLevel(int n) {
@@ -384,8 +420,7 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         quotaRequired = getQuotaForLevel(n);
         levelTimeRemaining = getTimeForLevel(n);
         lastSecondTick = System.currentTimeMillis();
-        // Reset retries only on fresh level advance (not on retry)
-        if (!isRetrying) retriesLeft = 3;
+        // retriesLeft is only reset via resetPlayerStats() on a brand-new game — never here
         isRetrying = false; // clear flag
         scoreAtLevelStart = score; // snapshot so retry can revert
 
@@ -591,7 +626,9 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         if (now - lastSecondTick >= 1000) {
             lastSecondTick = now;
             if (--levelTimeRemaining <= 0) {
-                gameState = GameState.GAME_OVER;
+                // Route through handlePlayerDefeat so Second Life can trigger on timeout too
+                if (player != null) player.health = 0;
+                handlePlayerDefeat();
             }
         }
     }
@@ -668,7 +705,8 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         int speed = (shooter.isBoss ? 10 : 8) + speedBonus;
 
         int[] spread;
-        if (pattern >= 5) spread = new int[]{-4, -2, 0, 2, 4};
+        if (pattern >= 6) spread = new int[]{-5, -3, -1, 1, 3, 5};
+        else if (pattern >= 5) spread = new int[]{-4, -2, 0, 2, 4};
         else if (pattern == 3) spread = new int[]{-2, 0, 2};
         else spread = new int[]{0};
 
@@ -716,13 +754,18 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
     private void handlePlayerDefeat() {
         if (playerSecondLife) {
             playerSecondLife = false;
+            // Revive: restore half HP (minimum 40), full ammo, reset reload, reset timer
             player.health = Math.max(40, player.maxHealth / 2);
             playerAmmo = playerMagazineSize;
             playerReloadTimer = 0;
+            levelTimeRemaining = Math.max(levelTimeRemaining, 15); // give at least 15s after revive
             explosions.add(new Explosion(player.x + player.width / 2, player.y + player.height / 2));
+            SoundManager.playSound("sounds/revive.wav"); // plays if file exists, silent otherwise
             return;
         }
-
+        // No revive — game over
+        score = scoreAtLevelStart;
+        saveScore();
         gameState = GameState.GAME_OVER;
     }
 
@@ -757,76 +800,90 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         Iterator<Bullet> bi = bullets.iterator();
         while (bi.hasNext()) {
             Bullet b = bi.next();
-            b.x += b.dx;
-            b.y += b.dy;
 
-            if (b.x < 0 || b.x > GAME_W || b.y < 0 || b.y > HEIGHT) {
-                bulletDamageMap.remove(b);
-                bi.remove();
-                continue;
-            }
+            // Step the bullet 1px at a time so it can't tunnel through thin walls
+            int absDx = Math.abs(b.dx);
+            int absDy = Math.abs(b.dy);
+            int steps = Math.max(1, Math.max(absDx, absDy));
+            double sx = (double) b.dx / steps;
+            double sy = (double) b.dy / steps;
+            double bxD = b.x, byD = b.y;
 
-            boolean wallHit = false;
-            if (usingLevelMap && levelMapMask != null && hitsLevelMap(b.getBounds())) {
-                explosions.add(new Explosion(b.x, b.y));
-                bulletDamageMap.remove(b);
-                bi.remove();
-                wallHit = true;
-            }
+            boolean removed = false;
+            for (int s = 0; s < steps; s++) {
+                bxD += sx;
+                byD += sy;
+                b.x = (int) Math.round(bxD);
+                b.y = (int) Math.round(byD);
 
-            if (!wallHit) {
-                for (Wall w : walls) {
-                    if (b.getBounds().intersects(w.getBounds())) {
-                        explosions.add(new Explosion(b.x, b.y));
-                        bulletDamageMap.remove(b);
-                        bi.remove();
-                        wallHit = true;
-                        break;
-                    }
-                }
-            }
-
-            if (wallHit) continue;
-
-            if (b.fromPlayer) {
-                Iterator<Tank> ei = enemies.iterator();
-                while (ei.hasNext()) {
-                    Tank en = ei.next();
-                    if (en.isBoss && !en.bossUnlocked) continue;
-
-                    if (b.getBounds().intersects(en.getBounds())) {
-                        int damage = bulletDamageMap.getOrDefault(b, b.fromPlayer ? playerBulletDamage : 10);
-                        en.health -= damage;
-                        explosions.add(new Explosion(en.x + en.width / 2, en.y + en.height / 2));
-                        bulletDamageMap.remove(b);
-                        bi.remove();
-
-                        if (en.health <= 0) {
-                            explosions.add(new Explosion(en.x + en.width / 2, en.y + en.height / 2));
-                            if (!en.isBoss) {
-                                quotaKilled++;
-                                score += 10 * level;
-                            } else {
-                                score += 500;
-                            }
-                            ei.remove();
-                        }
-                        break;
-                    }
-                }
-            } else {
-                if (b.getBounds().intersects(player.getBounds())) {
-                    int damage = bulletDamageMap.getOrDefault(b, 10);
-                    player.health -= damage;
-                    explosions.add(new Explosion(player.x + player.width / 2, player.y + player.height / 2));
+                if (b.x < 0 || b.x > GAME_W || b.y < 0 || b.y > HEIGHT) {
                     bulletDamageMap.remove(b);
                     bi.remove();
+                    removed = true;
+                    break;
+                }
 
-                    if (player.health <= 0) {
-                        handlePlayerDefeat();
+                boolean wallHit = false;
+                if (usingLevelMap && levelMapMask != null && hitsLevelMap(b.getBounds())) {
+                    explosions.add(new Explosion(b.x, b.y));
+                    bulletDamageMap.remove(b);
+                    bi.remove();
+                    removed = true;
+                    wallHit = true;
+                }
+                if (!wallHit) {
+                    for (Wall w : walls) {
+                        if (b.getBounds().intersects(w.getBounds())) {
+                            explosions.add(new Explosion(b.x, b.y));
+                            bulletDamageMap.remove(b);
+                            bi.remove();
+                            removed = true;
+                            wallHit = true;
+                            break;
+                        }
+                    }
+                }
+                if (wallHit) break;
+
+                // Tank hit checks
+                if (b.fromPlayer) {
+                    boolean hit = false;
+                    Iterator<Tank> ei = enemies.iterator();
+                    while (ei.hasNext()) {
+                        Tank en = ei.next();
+                        if (en.isBoss && !en.bossUnlocked) continue;
+                        if (b.getBounds().intersects(en.getBounds())) {
+                            int damage = bulletDamageMap.getOrDefault(b, playerBulletDamage);
+                            en.health -= damage;
+                            explosions.add(new Explosion(en.x + en.width/2, en.y + en.height/2));
+                            bulletDamageMap.remove(b);
+                            bi.remove();
+                            removed = true;
+                            if (en.health <= 0) {
+                                explosions.add(new Explosion(en.x + en.width/2, en.y + en.height/2));
+                                if (!en.isBoss) { quotaKilled++; score += 10 * level * scoreMultiplier; }
+                                else            { score += 500 * scoreMultiplier; }
+                                ei.remove();
+                            }
+                            hit = true;
+                            break;
+                        }
+                    }
+                    if (hit) break;
+                } else {
+                    if (b.getBounds().intersects(player.getBounds())) {
+                        int damage = bulletDamageMap.getOrDefault(b, 10);
+                        player.health -= damage;
+                        explosions.add(new Explosion(player.x + player.width/2, player.y + player.height/2));
+                        bulletDamageMap.remove(b);
+                        bi.remove();
+                        removed = true;
+                        if (player.health <= 0) handlePlayerDefeat();
+                        break;
                     }
                 }
             }
+            if (removed) continue; // already removed — skip
         }
     }
 
@@ -1437,18 +1494,72 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         int dx = px - ex;
         int dy = py - ey;
 
+        // Horizontal alignment: check both that tanks share roughly the same Y
+        // AND that the horizontal path (left/right) is clear of walls.
         if (Math.abs(dy) <= 18 && hasLineOfSight(en, player, true)) {
-            return dx < 0 ? Direction.LEFT : Direction.RIGHT;
+            Direction shootDir = dx < 0 ? Direction.LEFT : Direction.RIGHT;
+            // Extra check: make sure a bullet fired in this direction won't immediately
+            // hit a wall before reaching the player (prevents shooting through walls).
+            if (isBulletPathClear(ex, ey, shootDir, (int) dist)) {
+                return shootDir;
+            }
         }
 
+        // Vertical alignment: check both that tanks share roughly the same X
+        // AND that the vertical path (up/down) is clear of walls.
         if (Math.abs(dx) <= 18 && hasLineOfSight(en, player, false)) {
-            return dy < 0 ? Direction.UP : Direction.DOWN;
+            Direction shootDir = dy < 0 ? Direction.UP : Direction.DOWN;
+            if (isBulletPathClear(ex, ey, shootDir, (int) dist)) {
+                return shootDir;
+            }
         }
 
-        // Boss fallback: shoot in current facing direction if close enough
-        if (en.isBoss && dist < 240) return en.direction;
+        // Boss fallback: shoot in current facing direction if close enough AND path is clear
+        if (en.isBoss && dist < 240) {
+            if (isBulletPathClear(ex, ey, en.direction, 240)) {
+                return en.direction;
+            }
+        }
 
         return null;
+    }
+
+    /**
+     * Returns true if a bullet fired from (originX, originY) in the given direction
+     * will travel at least 'distance' pixels without hitting a wall.
+     * Uses step-by-step ray casting matching the bullet's actual travel path.
+     */
+    private boolean isBulletPathClear(int originX, int originY, Direction dir, int distance) {
+        int stepSize = 4; // smaller step = more accurate collision detection
+        int steps = Math.max(1, distance / stepSize);
+        int bx = originX, by = originY;
+        int bSize = 8; // default bullet size
+
+        for (int s = 0; s < steps; s++) {
+            switch (dir) {
+                case LEFT  -> bx -= stepSize;
+                case RIGHT -> bx += stepSize;
+                case UP    -> by -= stepSize;
+                case DOWN  -> by += stepSize;
+            }
+
+            // Out of bounds = clear (bullet will be removed naturally)
+            if (bx < 0 || bx > GAME_W || by < 0 || by > HEIGHT) return true;
+
+            Rectangle bRect = new Rectangle(bx - bSize / 2, by - bSize / 2, bSize, bSize);
+
+            // Check level map collision
+            if (usingLevelMap && levelMapMask != null && hitsLevelMap(bRect)) return false;
+
+            // Check wall collision - be aggressive
+            for (Wall w : walls) {
+                if (bRect.intersects(w.getBounds())) return false;
+            }
+
+            // Reached (or passed) the player — path is clear up to target
+            if (bRect.intersects(player.getBounds())) return true;
+        }
+        return true;
     }
 
     private boolean shouldEnemyShoot(Tank en) {
@@ -1466,7 +1577,8 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
             int start = Math.min(fromCx, toCx);
             int end = Math.max(fromCx, toCx);
 
-            Rectangle ray = new Rectangle(start, y - 3, Math.max(1, end - start), 6);
+            // Use a 10px-tall ray - thick enough to catch any blocking walls
+            Rectangle ray = new Rectangle(start, y - 5, Math.max(1, end - start), 10);
 
             if (usingLevelMap && levelMapMask != null && hitsLevelMap(ray)) return false;
             for (Wall w : walls) {
@@ -1478,7 +1590,8 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
             int start = Math.min(fromCy, toCy);
             int end = Math.max(fromCy, toCy);
 
-            Rectangle ray = new Rectangle(x - 3, start, 6, Math.max(1, end - start));
+            // Use a 10px-wide ray - thick enough to catch any blocking walls
+            Rectangle ray = new Rectangle(x - 5, start, 10, Math.max(1, end - start));
 
             if (usingLevelMap && levelMapMask != null && hitsLevelMap(ray)) return false;
             for (Wall w : walls) {
@@ -1517,24 +1630,32 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
 
         switch (boss.direction) {
             case UP -> {
-                fireCustomBossBullet(cx, cy, -3, -9);
-                fireCustomBossBullet(cx, cy, 0, -10);
-                fireCustomBossBullet(cx, cy, 3, -9);
+                if (isBulletPathClear(cx, cy, Direction.UP, 240)) {
+                    fireCustomBossBullet(cx, cy, -3, -9);
+                    fireCustomBossBullet(cx, cy, 0, -10);
+                    fireCustomBossBullet(cx, cy, 3, -9);
+                }
             }
             case DOWN -> {
-                fireCustomBossBullet(cx, cy, -3, 9);
-                fireCustomBossBullet(cx, cy, 0, 10);
-                fireCustomBossBullet(cx, cy, 3, 9);
+                if (isBulletPathClear(cx, cy, Direction.DOWN, 240)) {
+                    fireCustomBossBullet(cx, cy, -3, 9);
+                    fireCustomBossBullet(cx, cy, 0, 10);
+                    fireCustomBossBullet(cx, cy, 3, 9);
+                }
             }
             case LEFT -> {
-                fireCustomBossBullet(cx, cy, -9, -3);
-                fireCustomBossBullet(cx, cy, -10, 0);
-                fireCustomBossBullet(cx, cy, -9, 3);
+                if (isBulletPathClear(cx, cy, Direction.LEFT, 240)) {
+                    fireCustomBossBullet(cx, cy, -9, -3);
+                    fireCustomBossBullet(cx, cy, -10, 0);
+                    fireCustomBossBullet(cx, cy, -9, 3);
+                }
             }
             case RIGHT -> {
-                fireCustomBossBullet(cx, cy, 9, -3);
-                fireCustomBossBullet(cx, cy, 10, 0);
-                fireCustomBossBullet(cx, cy, 9, 3);
+                if (isBulletPathClear(cx, cy, Direction.RIGHT, 240)) {
+                    fireCustomBossBullet(cx, cy, 9, -3);
+                    fireCustomBossBullet(cx, cy, 10, 0);
+                    fireCustomBossBullet(cx, cy, 9, 3);
+                }
             }
         }
     }
@@ -1548,14 +1669,31 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         int cx = boss.x + boss.width / 2;
         int cy = boss.y + boss.height / 2;
 
-        int[][] dirs = {
-                {10, 0}, {-10, 0}, {0, 10}, {0, -10},
-                {7, 7}, {7, -7}, {-7, 7}, {-7, -7}
-        };
-
-        for (int[] d : dirs) {
-            Bullet b = new Bullet(cx - 5, cy - 5, 10, 10, d[0], d[1], false);
-            addBullet(b, 12);
+        Direction[] dirs = {Direction.RIGHT, Direction.LEFT, Direction.DOWN, Direction.UP};
+        
+        // Main cardinal directions - check walls
+        for (Direction d : dirs) {
+            if (isBulletPathClear(cx, cy, d, 240)) {
+                switch(d) {
+                    case RIGHT  -> { Bullet b = new Bullet(cx - 5, cy - 5, 10, 10, 10, 0, false); addBullet(b, 12); }
+                    case LEFT   -> { Bullet b = new Bullet(cx - 5, cy - 5, 10, 10, -10, 0, false); addBullet(b, 12); }
+                    case DOWN   -> { Bullet b = new Bullet(cx - 5, cy - 5, 10, 10, 0, 10, false); addBullet(b, 12); }
+                    case UP     -> { Bullet b = new Bullet(cx - 5, cy - 5, 10, 10, 0, -10, false); addBullet(b, 12); }
+                }
+            }
+        }
+        
+        // Diagonal shots - MUST check both axes since they move diagonally
+        int[][] diagonals = {{7, 7}, {7, -7}, {-7, 7}, {-7, -7}};
+        Direction[] xDirs = {Direction.RIGHT, Direction.RIGHT, Direction.LEFT, Direction.LEFT};
+        Direction[] yDirs = {Direction.DOWN, Direction.UP, Direction.DOWN, Direction.UP};
+        for (int i = 0; i < diagonals.length; i++) {
+            // For diagonal shots, BOTH axes must be clear
+            if (isBulletPathClear(cx, cy, xDirs[i], 180) && isBulletPathClear(cx, cy, yDirs[i], 180)) {
+                int[] d = diagonals[i];
+                Bullet b = new Bullet(cx - 5, cy - 5, 10, 10, d[0], d[1], false);
+                addBullet(b, 12);
+            }
         }
     }
 
@@ -1604,9 +1742,13 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         if (isBossLevel) {
             if (enemies.stream().noneMatch(e -> e.isBoss) && quotaKilled >= quotaRequired) {
                 if (level == MAX_LEVEL) {
+                    saveScore();
                     gameState = GameState.WIN;
                 } else {
-                    rollRewardCards();
+                    // After a boss level, reward with RARE cards before moving on
+                    pendingNextLevel = level + 1;
+                    cardSelectIsRare = true;
+                    rollRewardCards(true);
                     gameState = GameState.CARD_SELECT;
                 }
             }
@@ -1618,24 +1760,35 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
     }
 
     private void saveScore() {
-        if (!scoreSaved) {
-            String name = playerName.isBlank() ? "Player" : playerName;
-            if (LeaderboardManager.qualifiesForTop10(score)) {
-                LeaderboardManager.saveScore(name, score);
-            }
-            scoreSaved = true;
+        String name = playerName.isBlank() ? "Player" : playerName;
+        if (score > 0 && LeaderboardManager.qualifiesForTop10(score)) {
+            LeaderboardManager.saveScore(name, score);
         }
+        scoreSaved = true;
     }
 
+    /** Snapshot all current player upgrades into a SaveData object. */
     /**
-     * Public method to save score when the player closes/exits the game.
-     * Called by the window listener in Main.java when the game window is closing.
-     * Only saves if player is in GAME_OVER state (died or timed out).
+     * Called by window listener when game window is closing.
+     * Saves leaderboard score on exit.
      */
     public void saveScoreOnExit() {
-        // Only save if game ended (died or timed out) and score was not already saved
-        if (gameState == GameState.GAME_OVER && score > 0) {
-            saveScore();
+        // Only save if a game was actually in progress
+        if (gameState == GameState.MENU || gameState == GameState.NAME_INPUT
+                || gameState == GameState.TANK_SELECT || gameState == GameState.INSTRUCTIONS
+                || gameState == GameState.LEADERBOARD) return;
+        if (playerName.isBlank()) return;
+
+        // Save the score the player had at the START of the current level
+        // (i.e. what they legitimately earned from cleared levels).
+        // This avoids rewarding partial mid-level progress on accidental exit.
+        int scoreToSave = (gameState == GameState.GAME_OVER || gameState == GameState.WIN)
+                ? score              // game finished — save actual final score
+                : scoreAtLevelStart; // mid-game exit — save last fully-cleared level score
+
+        if (scoreToSave > 0 && LeaderboardManager.qualifiesForTop10(scoreToSave)) {
+            String name = playerName.isBlank() ? "Player" : playerName;
+            LeaderboardManager.saveScore(name, scoreToSave);
         }
     }
 
@@ -1916,56 +2069,115 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
     // ══════════════════════════════════════════════════════════════
     //  CARDS
     // ══════════════════════════════════════════════════════════════
-    private void rollRewardCards() {
-        offeredCards.clear();
-        ArrayList<CardPower> pool = new ArrayList<>(Arrays.asList(CardPower.values()));
-        Collections.shuffle(pool, random);
+    // ── Common card pool (excludes rare cards) ─────────────────────
+    private static final CardPower[] COMMON_CARDS = {
+        CardPower.CONTINUOUS_BULLET, CardPower.SIX_BULLET, CardPower.TRIPLE_BULLET,
+        CardPower.QUICK_RELOAD, CardPower.MAG_PLUS, CardPower.BULLET_SPEED,
+        CardPower.BIG_BULLETS, CardPower.DAMAGE_UP, CardPower.MAX_HP_UP,
+        CardPower.BATTLE_MEDIC, CardPower.ENGINE_BOOST, CardPower.SECOND_LIFE,
+        CardPower.HEAVY_SHOT
+    };
+    // ── Rare card pool (boss-reward only) ──────────────────────────
+    private static final CardPower[] RARE_CARDS = {
+        CardPower.RARE_DOUBLE_DAMAGE, CardPower.RARE_DOUBLE_HP,
+        CardPower.RARE_DOUBLE_SCORE,  CardPower.RARE_GHOST_RELOAD,
+        CardPower.RARE_SLOW_ENEMIES,  CardPower.RARE_RAPID_FIRE
+    };
 
-        offeredCards.add(pool.get(0));
-        offeredCards.add(pool.get(1));
-        offeredCards.add(pool.get(2));
+    private void rollRewardCards(boolean isRare) {
+        offeredCards.clear();
+        CardPower[] pool = isRare ? RARE_CARDS : COMMON_CARDS;
+        ArrayList<CardPower> shuffled = new ArrayList<>(Arrays.asList(pool));
+        // Remove cards already picked (won't reappear if they can't stack)
+        shuffled.removeIf(card -> pickedCards.contains(card));
+        Collections.shuffle(shuffled, random);
+        int count = Math.min(3, shuffled.size());
+        for (int i = 0; i < count; i++) offeredCards.add(shuffled.get(i));
     }
 
     private void applyCard(CardPower power) {
         switch (power) {
+            // ── Common cards ──────────────────────────────────────────
             case CONTINUOUS_BULLET -> {
                 playerContinuousFire = true;
                 playerShotCooldownFrames = 4;
             }
-            case FIVE_BULLET -> playerBulletPattern = 5;
+            case SIX_BULLET -> playerBulletPattern = 6;
             case TRIPLE_BULLET -> {
-                if (playerBulletPattern < 5) playerBulletPattern = 3;
+                if (playerBulletPattern < 6) playerBulletPattern = 3;
             }
-            case QUICK_RELOAD -> playerReloadFrames = Math.max(60, playerReloadFrames - 60);
+            case QUICK_RELOAD -> playerReloadFrames = Math.max(20, playerReloadFrames - 60);
             case MAG_PLUS -> {
+                // Always adds +2 to whatever the current mag is
                 playerMagazineSize += 2;
                 playerAmmo = playerMagazineSize;
             }
             case BULLET_SPEED -> playerBulletSpeedBonus += 2;
-            case BIG_BULLETS -> playerBulletSizeBonus += 2;
-            case DAMAGE_UP -> playerBulletDamage += 6;
+            case BIG_BULLETS  -> playerBulletSizeBonus  += 2;
+            case DAMAGE_UP    -> playerBulletDamage      += 6;
             case MAX_HP_UP -> {
                 playerMaxHealthStat += 30;
-                if (player != null) {
-                    player.maxHealth = playerMaxHealthStat;
-                    player.health = Math.min(player.maxHealth, player.health + 30);
-                }
+                if (player != null) player.maxHealth = playerMaxHealthStat;
             }
-            case FULL_REPAIR -> {
-                if (player != null) {
-                    player.health = player.maxHealth;
-                }
+            case BATTLE_MEDIC -> {
+                playerMaxHealthStat += 50;
+                if (player != null) player.maxHealth = playerMaxHealthStat;
+            }
+            case HEAVY_SHOT -> {
+                playerBulletDamage   += 15;
+                playerBulletSizeBonus += 2;
             }
             case ENGINE_BOOST -> {
                 playerMoveSpeedStat += 1;
                 if (player != null) player.speed = playerMoveSpeedStat;
             }
             case SECOND_LIFE -> playerSecondLife = true;
+
+            // ── Rare cards ────────────────────────────────────────────
+            case RARE_DOUBLE_DAMAGE -> playerBulletDamage = playerBulletDamage * 2;
+            case RARE_DOUBLE_HP -> {
+                playerMaxHealthStat = playerMaxHealthStat * 2;
+                if (player != null) player.maxHealth = playerMaxHealthStat;
+            }
+            case RARE_DOUBLE_SCORE  -> scoreMultiplier *= 2;
+            case RARE_GHOST_RELOAD  -> {
+                playerMagazineSize = playerMagazineSize * 3;
+                playerAmmo         = playerMagazineSize;
+            }
+            case RARE_SLOW_ENEMIES  -> enemySlowActive = true;
+            case RARE_RAPID_FIRE -> {
+                playerContinuousFire     = true;
+                playerShotCooldownFrames = 2; // triple speed
+            }
+        }
+
+        // ── Mark card as picked (non-stackable cards won't reappear) ──
+        // Stackable: DAMAGE_UP, MAG_PLUS, BULLET_SPEED, BIG_BULLETS, MAX_HP_UP,
+        //            ENGINE_BOOST, BATTLE_MEDIC, HEAVY_SHOT (all stackable, can reappear)
+        // Non-stackable (one-time only): CONTINUOUS_BULLET, SIX_BULLET, TRIPLE_BULLET,
+        //            QUICK_RELOAD, SECOND_LIFE, all RARE cards
+        boolean isNonStackable = switch (power) {
+            case CONTINUOUS_BULLET, SIX_BULLET, TRIPLE_BULLET,
+                 QUICK_RELOAD,
+                 SECOND_LIFE,
+                 RARE_DOUBLE_DAMAGE, RARE_DOUBLE_HP, RARE_DOUBLE_SCORE,
+                 RARE_GHOST_RELOAD, RARE_SLOW_ENEMIES, RARE_RAPID_FIRE -> true;
+            default -> false;  // MAG_PLUS, BATTLE_MEDIC, HEAVY_SHOT, DAMAGE_UP etc. can all reappear
+        };
+        // Special case: TRIPLE_BULLET becomes non-stackable once SIX_BULLET is picked
+        if (power == CardPower.TRIPLE_BULLET && playerBulletPattern >= 6) isNonStackable = true;
+        if (isNonStackable) pickedCards.add(power);
+        // Also prevent TRIPLE_BULLET from showing once we have 6-bullet
+        if (playerBulletPattern >= 6) pickedCards.add(CardPower.TRIPLE_BULLET);
+        // Once CONTINUOUS_BULLET is picked, RARE_RAPID_FIRE does same thing - exclude both
+        if (playerContinuousFire) {
+            pickedCards.add(CardPower.CONTINUOUS_BULLET);
+            pickedCards.add(CardPower.RARE_RAPID_FIRE);
         }
 
         offeredCards.clear();
-        level++;
-        startLevel(level);
+        cardSelectIsRare = false;
+        startLevel(pendingNextLevel);
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -1975,28 +2187,46 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
         Graphics2D g2 = (Graphics2D) g;
+
+        // ── Fullscreen: fill letterbox area and apply scale ───────────
+        if (fullscreen && (fsOffX > 0 || fsOffY > 0)) {
+            g2.setColor(Color.BLACK);
+            g2.fillRect(0, 0, getWidth(), getHeight());
+        }
+        if (fullscreen) {
+            g2.translate(fsOffX, fsOffY);
+            g2.scale(fsScaleX, fsScaleY);
+            // Use nearest-neighbour for crisp pixels (no blurry bilinear stretch)
+            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                    RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+            g2.setRenderingHint(RenderingHints.KEY_RENDERING,
+                    RenderingHints.VALUE_RENDER_SPEED);
+        }
+
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,      RenderingHints.VALUE_ANTIALIAS_ON);
         g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
         switch (gameState) {
-            case MENU         -> { drawMenuBg(g2); drawMenu(g2);         return; }
-            case NAME_INPUT   -> { drawMenuBg(g2); drawNameInput(g2);    return; }
-            case TANK_SELECT  -> { drawMenuBg(g2); drawTankSelect(g2);   return; }
-            case INSTRUCTIONS -> { drawMenuBg(g2); drawInstructions(g2); return; }
-            case LEADERBOARD  -> { drawMenuBg(g2); drawLeaderboard(g2);  return; }
+            case MENU            -> { drawMenuBg(g2); drawMenu(g2);            return; }
+            case NAME_INPUT      -> { drawMenuBg(g2); drawNameInput(g2);       return; }
+
+            case LB_NAME_WARN    -> { drawMenuBg(g2); drawLbNameWarn(g2);      return; }
+            case TANK_SELECT     -> { drawMenuBg(g2); drawTankSelect(g2);      return; }
+            case INSTRUCTIONS    -> { drawMenuBg(g2); drawInstructions(g2);    return; }
+            case LEADERBOARD     -> { drawMenuBg(g2); drawLeaderboard(g2);     return; }
             default -> {}
         }
 
         drawGameBg(g2);
         drawTopBar(g2);
 
-        g.setClip(0, TOP_BAR, GAME_W, HEIGHT - TOP_BAR);
+        g2.setClip(0, TOP_BAR, GAME_W, HEIGHT - TOP_BAR);
         drawWalls(g2);
         if (player != null) drawTank(g2, player);
         for (Tank en : new ArrayList<>(enemies)) drawTank(g2, en);
         for (Bullet b  : new ArrayList<>(bullets)) drawBullet(g2, b);
         drawExplosions(g2);
-        g.setClip(null);
+        g2.setClip(null);
 
         drawSidebar(g2);
 
@@ -2007,7 +2237,7 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
 
         if      (pauseMenuOpen || gameState == GameState.PAUSED) drawPauseMenu(g2);
         else if (gameState == GameState.LEVEL_CLEARED)           drawLevelCleared(g2);
-        else if (gameState == GameState.GAME_OVER)               { drawGameOver(g2); }
+        else if (gameState == GameState.GAME_OVER)               drawGameOver(g2);
         else if (gameState == GameState.WIN)                     drawWin(g2);
     }
 
@@ -2436,8 +2666,119 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
 
         g2.setColor(new Color(110,130,195));
         g2.setFont(new Font("Arial",Font.ITALIC,13));
-        String hint2 = "Tip: Use an existing name to continue your saved score!";
+        String hint2 = "Note: Names already on the leaderboard cannot be reused.";
         g2.drawString(hint2, cx - g2.getFontMetrics().stringWidth(hint2) / 2, cy + 96);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  CONTINUE PROMPT SCREEN
+    // ══════════════════════════════════════════════════════════════
+    private void drawLbNameWarn(Graphics2D g2) {
+        int cx = WIDTH / 2, cy = HEIGHT / 2;
+
+        // Dim background
+        g2.setColor(new Color(0, 0, 0, 170));
+        g2.fillRect(0, 0, WIDTH, HEIGHT);
+
+        // ── Panel — truly centered ────────────────────────────────────
+        int panW = 660, panH = 316;
+        int px = cx - panW / 2, py = cy - panH / 2;
+
+        g2.setColor(new Color(10, 14, 42, 252));
+        g2.fillRoundRect(px, py, panW, panH, 24, 24);
+        g2.setColor(new Color(220, 70, 70));
+        g2.setStroke(new BasicStroke(2.5f));
+        g2.drawRoundRect(px, py, panW, panH, 24, 24);
+        g2.setStroke(new BasicStroke(1f));
+
+        int pad = 36; // inner horizontal padding from panel edge
+
+        // ── Title ─────────────────────────────────────────────────────
+        g2.setColor(new Color(255, 110, 110));
+        g2.setFont(new Font("Arial", Font.BOLD, 26));
+        FontMetrics fm = g2.getFontMetrics();
+        String title = "! Name Already Taken !";
+        g2.drawString(title, cx - fm.stringWidth(title) / 2, py + 46);
+
+        // Divider
+        g2.setColor(new Color(180, 60, 60, 120));
+        g2.setStroke(new BasicStroke(1.5f));
+        g2.drawLine(px + pad, py + 58, px + panW - pad, py + 58);
+        g2.setStroke(new BasicStroke(1f));
+
+        // ── Info box ──────────────────────────────────────────────────
+        int infoX = px + pad, infoY = py + 70;
+        int infoW = panW - pad * 2, infoH = 140;
+
+        g2.setColor(new Color(22, 12, 12, 230));
+        g2.fillRoundRect(infoX, infoY, infoW, infoH, 12, 12);
+        g2.setColor(new Color(180, 60, 60, 130));
+        g2.setStroke(new BasicStroke(1.5f));
+        g2.drawRoundRect(infoX, infoY, infoW, infoH, 12, 12);
+        g2.setStroke(new BasicStroke(1f));
+
+        int textX = infoX + 20;
+        g2.setColor(new Color(210, 170, 170));
+        g2.setFont(new Font("Arial", Font.BOLD, 14));
+        g2.drawString("Player:  " + playerName, textX, infoY + 26);
+
+        g2.setColor(new Color(255, 220, 80));
+        g2.setFont(new Font("Arial", Font.BOLD, 20));
+        g2.drawString("Leaderboard Best Score:  " + lbExistingScore, textX, infoY + 56);
+
+        g2.setColor(new Color(255, 150, 150));
+        g2.setFont(new Font("Arial", Font.PLAIN, 13));
+        g2.drawString("Starting a new game resets your run score to 0.", textX, infoY + 84);
+        g2.drawString("You will begin from Level 1 with no upgrades.", textX, infoY + 103);
+
+        g2.setColor(new Color(120, 200, 140));
+        g2.setFont(new Font("Arial", Font.ITALIC, 12));
+        g2.drawString("Your leaderboard record is safe — it only updates if you beat it.", textX, infoY + 126);
+
+        // ── Two buttons — equal width, equal gap from center ─────────
+        int btnW   = 260, btnH = 52;
+        int btnGap = 20; // gap between the two buttons
+        int totalBtnW = btnW * 2 + btnGap;
+        int btnStartX = cx - totalBtnW / 2;
+        int btnY = infoY + infoH + 28; // 28px gap below info box
+
+        // YES button
+        int yBtnX = btnStartX;
+        boolean yHover = mousePos != null
+                && mousePos.x >= yBtnX && mousePos.x <= yBtnX + btnW
+                && mousePos.y >= btnY  && mousePos.y <= btnY + btnH;
+        g2.setColor(yHover ? new Color(210, 55, 55) : new Color(140, 25, 25));
+        g2.fillRoundRect(yBtnX, btnY, btnW, btnH, 12, 12);
+        g2.setColor(yHover ? Color.WHITE : new Color(255, 120, 120));
+        g2.setStroke(new BasicStroke(2f));
+        g2.drawRoundRect(yBtnX, btnY, btnW, btnH, 12, 12);
+        g2.setStroke(new BasicStroke(1f));
+        g2.setColor(Color.WHITE);
+        g2.setFont(new Font("Arial", Font.BOLD, 14));
+        fm = g2.getFontMetrics();
+        String yes = "YES, START FRESH  [Y / ENTER]";
+        g2.drawString(yes, yBtnX + (btnW - fm.stringWidth(yes)) / 2, btnY + btnH / 2 + fm.getAscent() / 2 - 2);
+
+        // NO button
+        int nBtnX = btnStartX + btnW + btnGap;
+        boolean nHover = mousePos != null
+                && mousePos.x >= nBtnX && mousePos.x <= nBtnX + btnW
+                && mousePos.y >= btnY  && mousePos.y <= btnY + btnH;
+        g2.setColor(nHover ? new Color(35, 140, 75) : new Color(18, 80, 42));
+        g2.fillRoundRect(nBtnX, btnY, btnW, btnH, 12, 12);
+        g2.setColor(nHover ? Color.WHITE : new Color(90, 210, 130));
+        g2.setStroke(new BasicStroke(2f));
+        g2.drawRoundRect(nBtnX, btnY, btnW, btnH, 12, 12);
+        g2.setStroke(new BasicStroke(1f));
+        g2.setColor(Color.WHITE);
+        g2.setFont(new Font("Arial", Font.BOLD, 14));
+        fm = g2.getFontMetrics();
+        String no = "PICK A NAME  [N / ESC]";
+        g2.drawString(no, nBtnX + (btnW - fm.stringWidth(no)) / 2, btnY + btnH / 2 + fm.getAscent() / 2 - 2);
+
+        // also update mouse click rects used in mouseClicked handler
+        lbWarnYesRect.setBounds(yBtnX, btnY, btnW, btnH);
+        lbWarnNoRect .setBounds(nBtnX, btnY, btnW, btnH);
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -2711,111 +3052,146 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
 
         // Title
         g2.setColor(Color.WHITE);
-        g2.setFont(new Font("Arial",Font.BOLD,34));
+        g2.setFont(new Font("Arial",Font.BOLD,38));
         FontMetrics fm = g2.getFontMetrics();
         String title = "HOW TO PLAY";
-        g2.drawString(title,(WIDTH - fm.stringWidth(title)) / 2, 76);
+        g2.drawString(title,(WIDTH - fm.stringWidth(title)) / 2, 80);
         g2.setColor(new Color(55,115,255,135));
-        g2.drawLine(100,88, WIDTH - 100, 88);
+        g2.drawLine(100,94, WIDTH - 100, 94);
 
         // ── LEFT COLUMN: Movement keys diagram ────────────────────────
-        int kx = 120, ky = 120; // top-left of key diagram area
-        int kSz = 44, kGap = 6;
+        int kx = 110, ky = 120;
+        int kSz = 50, kGap = 7;
 
-        // Helper draws one key box
-        // W key (up)
         int wKx = kx + kSz + kGap;
-        drawKeyBox(g2, wKx, ky,          kSz, "W", "UP");
-        drawKeyBox(g2, kx,  ky + kSz + kGap, kSz, "A", "LEFT");
-        drawKeyBox(g2, wKx, ky + kSz + kGap, kSz, "S", "DOWN");
-        drawKeyBox(g2, kx + (kSz + kGap)*2, ky + kSz + kGap, kSz, "D", "RIGHT");
+        drawKeyBox(g2, wKx, ky,                   kSz, "W", "UP");
+        drawKeyBox(g2, kx,  ky + kSz + kGap,      kSz, "A", "LEFT");
+        drawKeyBox(g2, wKx, ky + kSz + kGap,      kSz, "S", "DOWN");
+        drawKeyBox(g2, kx + (kSz+kGap)*2, ky + kSz + kGap, kSz, "D", "RIGHT");
 
-        // Arrow keys (same layout, to the right)
-        int ax = kx + (kSz + kGap) * 3 + 18;
-        drawKeyBox(g2, ax + kSz + kGap, ky,          kSz, "↑", "UP");
+        // Arrow keys
+        int ax = kx + (kSz + kGap) * 3 + 22;
+        drawKeyBox(g2, ax + kSz + kGap, ky,              kSz, "↑", "UP");
         drawKeyBox(g2, ax,              ky + kSz + kGap, kSz, "←", "LEFT");
         drawKeyBox(g2, ax + kSz + kGap, ky + kSz + kGap, kSz, "↓", "DOWN");
         drawKeyBox(g2, ax + (kSz+kGap)*2, ky + kSz + kGap, kSz, "→", "RIGHT");
 
         g2.setColor(new Color(130,160,255));
-        g2.setFont(new Font("Arial",Font.BOLD,11));
-        g2.drawString("WASD", kx + 10, ky + kSz*2 + kGap*2 + 18);
-        g2.drawString("ARROW KEYS", ax, ky + kSz*2 + kGap*2 + 18);
-
-        g2.setColor(new Color(180,195,255));
-        g2.setFont(new Font("Arial",Font.PLAIN,13));
-        g2.drawString("Move your tank", kx, ky + kSz*2 + kGap*2 + 36);
-
-        // SPACE key
-        int spY = ky + kSz*2 + kGap*2 + 58;
-        g2.setColor(new Color(28,52,118));
-        g2.fillRoundRect(kx, spY, (kSz*2 + kGap), 36, 8, 8);
-        g2.setColor(new Color(100,160,255));
-        g2.setStroke(new BasicStroke(1.5f));
-        g2.drawRoundRect(kx, spY, (kSz*2 + kGap), 36, 8, 8);
-        g2.setStroke(new BasicStroke(1f));
-        g2.setColor(Color.WHITE);
         g2.setFont(new Font("Arial",Font.BOLD,13));
         fm = g2.getFontMetrics();
-        g2.drawString("SPACE", kx + ((kSz*2+kGap) - fm.stringWidth("SPACE"))/2, spY + 23);
-        g2.setColor(new Color(180,195,255));
-        g2.setFont(new Font("Arial",Font.PLAIN,13));
-        g2.drawString("Shoot  (hold = auto)", kx + (kSz*2 + kGap) + 10, spY + 23);
+        int wasdGroupW  = kSz * 3 + kGap * 2;
+        int arrowGroupW = kSz * 3 + kGap * 2;
+        g2.drawString("WASD",       kx + (wasdGroupW  - fm.stringWidth("WASD"))       / 2, ky + kSz*2 + kGap*2 + 20);
+        g2.drawString("ARROW KEYS", ax + (arrowGroupW - fm.stringWidth("ARROW KEYS")) / 2, ky + kSz*2 + kGap*2 + 20);
 
-        // ESC / P key
-        int escY = spY + 52;
+        g2.setColor(new Color(200,215,255));
+        g2.setFont(new Font("Arial",Font.PLAIN,15));
+        g2.drawString("Move your tank", kx, ky + kSz*2 + kGap*2 + 65);
+
+        // SPACE key
+        int spY = ky + kSz*2 + kGap*2 + 89;
+        g2.setColor(new Color(28,52,118));
+        g2.fillRoundRect(kx, spY, (kSz*2 + kGap), 40, 8, 8);
+        g2.setColor(new Color(100,160,255));
+        g2.setStroke(new BasicStroke(1.5f));
+        g2.drawRoundRect(kx, spY, (kSz*2 + kGap), 40, 8, 8);
+        g2.setStroke(new BasicStroke(1f));
+        g2.setColor(Color.WHITE);
+        g2.setFont(new Font("Arial",Font.BOLD,15));
+        fm = g2.getFontMetrics();
+        g2.drawString("SPACE", kx + ((kSz*2+kGap) - fm.stringWidth("SPACE"))/2, spY + 26);
+        g2.setColor(new Color(200,215,255));
+        g2.setFont(new Font("Arial",Font.PLAIN,15));
+        g2.drawString("Shoot  (hold = auto)", kx + (kSz*2 + kGap) + 14, spY + 26);
+
+        // ESC key
+        int escY = spY + 58;
         drawKeyBox(g2, kx, escY, kSz, "ESC", null);
-        g2.setColor(new Color(180,195,255));
-        g2.setFont(new Font("Arial",Font.PLAIN,13));
-        g2.drawString("Pause / Settings", kx + kSz + 10, escY + 28);
+        g2.setColor(new Color(200,215,255));
+        g2.setFont(new Font("Arial",Font.PLAIN,15));
+        g2.drawString("Pause / Settings", kx + kSz + 14, escY + 32);
+
+        // P key
+        int pY = escY + 62;
+        drawKeyBox(g2, kx, pY, kSz, "P", null);
+        g2.setColor(new Color(200,215,255));
+        g2.setFont(new Font("Arial",Font.PLAIN,15));
+        g2.drawString("Pause (toggle)", kx + kSz + 14, pY + 32);
+
+        // F11 key
+        int f11Y = pY + 62;
+        drawKeyBox(g2, kx, f11Y, kSz, "F11", null);
+        g2.setColor(new Color(200,215,255));
+        g2.setFont(new Font("Arial",Font.PLAIN,15));
+        g2.drawString("Fullscreen toggle", kx + kSz + 14, f11Y + 32);
 
         // ── RIGHT COLUMN: Game rules ───────────────────────────────────
-        int rx = WIDTH / 2 + 20;
-        int ry = 108;
-        int lineH = 34;
-
+        // Dynamically space rows to fill available height
+        int rx = WIDTH / 2 + 30;
+        int rulesTop = 110;
+        int rulesBottom = HEIGHT - 72; // leave room for back button
         Object[][] rules = {
             {"LEVELS",     "15 total  ·  Easy 1–5  ·  Med 6–10  ·  Hard 11–15"},
-            {"RETRIES",    "3 retries per level  -  no more = game ends"},
-            {"SCORE",      "Score resets to level-start value on retry"},
-            {"LEADERBOARD","Top 10 only  -  low scores won't be recorded"},
-            {"CARDS",      "Pick 1 of 3 upgrades after clearing a level"},
+            {"RETRIES",    "3 retries per run  —  no more = game ends"},
+            {"SCORE",      "Resets to level-start value on retry"},
+            {"LEADERBOARD","Top 10 only  —  low scores won't be recorded"},
+            {"CARDS",      "Pick 1 of 3 common upgrades before every level"},
+            {"RARE CARDS", "Defeat a boss → pick 1 of 3 RARE upgrades!"},
             {"LVL 5",      "Mini-Boss  (kill minions first to unlock)"},
             {"LVL 10",     "Elite Boss"},
-            {"LVL 15",     "Final Boss  -  defeat to win!"},
-            {"NEXT LVL",   "Press E or ENTER on Level Cleared screen"},
-            {"SCORING",    "Enemy kill = +10 × level  ·  Boss kill = +500"},
+            {"LVL 15",     "Final Boss  —  defeat to win!"},
+            {"SCORING",    "+10 × level per kill  ·  Boss kill = +500"},
         };
 
+        int rowCount = rules.length;
+        // Each row: pill (22px tall) + value text below it — compute lineH to spread evenly
+        int totalRowH = rulesBottom - rulesTop;
+        int lineH = totalRowH / rowCount;  // e.g. ~56px per row at 700px height
+
+        int pillW = 124, pillH = 24;
+
+        int ry = rulesTop + lineH / 2; // start centered in first slot
         for (Object[] row : rules) {
-            // tag pill
-            g2.setColor(new Color(22,44,110));
-            g2.fillRoundRect(rx, ry - 17, 112, 22, 7, 7);
-            g2.setColor(new Color(100,148,255));
-            g2.setFont(new Font("Arial",Font.BOLD,10));
+            String tag = (String)row[0];
+            String val = (String)row[1];
+
+            // pill background — golden tint for rare-related rows
+            boolean isRareRow = tag.equals("RARE CARDS");
+            g2.setColor(isRareRow ? new Color(60,36,4) : new Color(22,44,110));
+            g2.fillRoundRect(rx, ry - pillH + 4, pillW, pillH, 8, 8);
+            g2.setColor(isRareRow ? new Color(220,160,40) : new Color(100,148,255));
+            g2.setStroke(new BasicStroke(isRareRow ? 1.5f : 1f));
+            g2.drawRoundRect(rx, ry - pillH + 4, pillW, pillH, 8, 8);
+            g2.setStroke(new BasicStroke(1f));
+
+            // pill label
+            g2.setColor(isRareRow ? new Color(255,210,80) : new Color(140,180,255));
+            g2.setFont(new Font("Arial",Font.BOLD,12));
             fm = g2.getFontMetrics();
-            g2.drawString((String)row[0], rx + (112 - fm.stringWidth((String)row[0]))/2, ry - 3);
-            // value text
-            g2.setColor(new Color(200,212,252));
-            g2.setFont(new Font("Arial",Font.PLAIN,13));
-            g2.drawString((String)row[1], rx + 120, ry);
+            g2.drawString(tag, rx + (pillW - fm.stringWidth(tag))/2, ry - 2);
+
+            // value text — right of pill
+            g2.setColor(isRareRow ? new Color(255,230,160) : new Color(210,222,255));
+            g2.setFont(new Font("Arial",Font.PLAIN,15));
+            g2.drawString(val, rx + pillW + 14, ry);
+
             ry += lineH;
         }
 
         // Back button
-        int bx = WIDTH / 2 - 135;
-        int backBtnY = HEIGHT - 56;
+        int bx = WIDTH / 2 - 145;
+        int backBtnY = HEIGHT - 58;
         g2.setColor(new Color(32,52,128,208));
-        g2.fillRoundRect(bx, backBtnY, 270, 38, 14, 14);
+        g2.fillRoundRect(bx, backBtnY, 290, 40, 14, 14);
         g2.setColor(new Color(85,135,255));
         g2.setStroke(new BasicStroke(1.5f));
-        g2.drawRoundRect(bx, backBtnY, 270, 38, 14, 14);
+        g2.drawRoundRect(bx, backBtnY, 290, 40, 14, 14);
         g2.setStroke(new BasicStroke(1f));
         g2.setColor(Color.WHITE);
-        g2.setFont(new Font("Arial",Font.BOLD,16));
+        g2.setFont(new Font("Arial",Font.BOLD,17));
         fm = g2.getFontMetrics();
-        String backLbl = "ESC  -  Return to Menu";
-        g2.drawString(backLbl, bx + (270 - fm.stringWidth(backLbl)) / 2, backBtnY + 24);
+        String backLbl = "ESC  —  Return to Menu";
+        g2.drawString(backLbl, bx + (290 - fm.stringWidth(backLbl)) / 2, backBtnY + 26);
     }
 
     /** Draws a single keyboard key box with a main label and optional sub-label. */
@@ -2827,49 +3203,59 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         g2.drawRoundRect(x, y, sz, sz, 8, 8);
         g2.setStroke(new BasicStroke(1f));
         g2.setColor(Color.WHITE);
-        g2.setFont(new Font("Arial", Font.BOLD, label.length() > 2 ? 10 : 15));
+        g2.setFont(new Font("Arial", Font.BOLD, label.length() > 2 ? 12 : 17));
         FontMetrics fm = g2.getFontMetrics();
-        g2.drawString(label, x + (sz - fm.stringWidth(label)) / 2, y + sz/2 + fm.getAscent()/2 - (sub != null ? 4 : 0));
+        g2.drawString(label, x + (sz - fm.stringWidth(label)) / 2, y + sz/2 + fm.getAscent()/2 - (sub != null ? 5 : 0));
         if (sub != null) {
             g2.setColor(new Color(130,170,255));
-            g2.setFont(new Font("Arial", Font.PLAIN, 9));
+            g2.setFont(new Font("Arial", Font.PLAIN, 11));
             fm = g2.getFontMetrics();
-            g2.drawString(sub, x + (sz - fm.stringWidth(sub)) / 2, y + sz - 5);
+            g2.drawString(sub, x + (sz - fm.stringWidth(sub)) / 2, y + sz - 6);
         }
     }
 
     private void drawLeaderboard(Graphics2D g2) {
         g2.setColor(new Color(0,0,0,180));
         g2.fillRect(0,0,WIDTH,HEIGHT);
+
+        int panelX = 160, panelW = WIDTH - 320;
         g2.setColor(new Color(8,14,42,248));
-        g2.fillRoundRect(185,34,WIDTH - 370,HEIGHT - 68,22,22);
+        g2.fillRoundRect(panelX, 34, panelW, HEIGHT - 68, 22, 22);
         g2.setColor(new Color(215,165,25));
         g2.setStroke(new BasicStroke(2f));
-        g2.drawRoundRect(185,34,WIDTH - 370,HEIGHT - 68,22,22);
+        g2.drawRoundRect(panelX, 34, panelW, HEIGHT - 68, 22, 22);
         g2.setStroke(new BasicStroke(1f));
 
         g2.setColor(new Color(255,212,65));
         g2.setFont(new Font("Arial",Font.BOLD,42));
         FontMetrics fm = g2.getFontMetrics();
         String title = "LEADERBOARD";
-        g2.drawString(title,(WIDTH - fm.stringWidth(title)) / 2,98);
+        g2.drawString(title,(WIDTH - fm.stringWidth(title)) / 2, 98);
         g2.setColor(new Color(155,115,0,135));
-        g2.drawLine(225,112,WIDTH - 225,112);
+        g2.drawLine(panelX + 30, 112, panelX + panelW - 30, 112);
 
-        int c1 = 258, c2 = 418, c3 = WIDTH - 308;
+        // Column positions — evenly spaced inside the panel
+        int innerX  = panelX + 30;
+        int innerW  = panelW - 60;
+        int c1 = innerX;                          // RANK  (80px wide)
+        int c2 = innerX + 90;                     // NAME  (up to 260px)
+        int c3 = innerX + innerW - 100;           // SCORE (right-aligned area)
+        int nameMaxW = c3 - c2 - 20;              // max pixels for name text
+
         g2.setColor(new Color(125,162,252));
         g2.setFont(new Font("Arial",Font.BOLD,15));
-        g2.drawString("RANK",c1,146);
-        g2.drawString("NAME",c2,146);
-        g2.drawString("SCORE",c3,146);
+        g2.drawString("RANK", c1, 146);
+        g2.drawString("NAME", c2, 146);
+        g2.drawString("SCORE", c3, 146);
         g2.setColor(new Color(52,72,138));
-        g2.drawLine(225,152,WIDTH - 225,152);
+        g2.drawLine(panelX + 20, 152, panelX + panelW - 20, 152);
 
         List<ScoreEntry> sc = LeaderboardManager.loadScores();
         if (sc.isEmpty()) {
             g2.setColor(new Color(125,135,178));
             g2.setFont(new Font("Arial",Font.ITALIC,22));
-            g2.drawString("No scores yet - be the first!", (WIDTH - 360) / 2, 338);
+            String empty = "No scores yet - be the first!";
+            g2.drawString(empty, (WIDTH - g2.getFontMetrics().stringWidth(empty)) / 2, 338);
         } else {
             Color[] medals = {new Color(255,212,0),new Color(198,198,198),new Color(175,98,48)};
             int y = 186;
@@ -2877,27 +3263,36 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
                 ScoreEntry se = sc.get(i);
                 boolean top = i < 3;
 
+                // Row background
                 g2.setColor(i % 2 == 0 ? new Color(18,28,68,108) : new Color(8,14,48,68));
-                g2.fillRoundRect(222,y - 18,WIDTH - 444,28,6,6);
+                g2.fillRoundRect(panelX + 16, y - 18, panelW - 32, 28, 6, 6);
 
+                // RANK
                 g2.setColor(top ? medals[i] : new Color(152,162,208));
-                g2.setFont(new Font("Arial",top ? Font.BOLD : Font.PLAIN, top ? 18 : 16));
-                g2.drawString((i + 1) + (top ? (i == 0 ? " [1st]" : i == 1 ? " [2nd]" : " [3rd]") : ""), c1, y);
+                g2.setFont(new Font("Arial", top ? Font.BOLD : Font.PLAIN, top ? 18 : 16));
+                String rankStr = (i + 1) + (top ? (i == 0 ? " \u25CF" : i == 1 ? " \u25CF" : " \u25CF") : "");
+                g2.drawString(rankStr, c1, y);
 
+                // NAME — clip if too long
                 g2.setColor(top ? Color.WHITE : new Color(192,202,236));
-                g2.setFont(new Font("Arial",top ? Font.BOLD : Font.PLAIN,16));
-                g2.drawString(se.name, c2, y);
+                g2.setFont(new Font("Arial", top ? Font.BOLD : Font.PLAIN, 16));
+                String nameStr = fitText(g2, se.name, nameMaxW);
+                g2.drawString(nameStr, c2, y);
 
+                // SCORE — right-align within score column
+                g2.setFont(new Font("Arial", Font.BOLD, 16));
                 g2.setColor(top ? new Color(255,212,65) : new Color(152,192,255));
-                g2.setFont(new Font("Arial",Font.BOLD,16));
-                g2.drawString(String.valueOf(se.score), c3, y);
+                String scoreStr = String.valueOf(se.score);
+                fm = g2.getFontMetrics();
+                // Right-align: draw so right edge sits at innerX + innerW
+                g2.drawString(scoreStr, innerX + innerW - fm.stringWidth(scoreStr), y);
 
                 y += 40;
             }
         }
 
         int bx = WIDTH / 2 - 135;
-        int lbBackY = 34 + (HEIGHT - 68) - 52; // anchored inside panel bottom
+        int lbBackY = 34 + (HEIGHT - 68) - 52;
         g2.setColor(new Color(42,62,128,208));
         g2.fillRoundRect(bx, lbBackY, 270, 40, 14, 14);
         g2.setColor(new Color(165,128,38));
@@ -2912,152 +3307,173 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
     }
 
     private void drawSidebar(Graphics2D g2) {
-        int sx = GAME_W, sw = SIDEBAR, px = sx + 14;
+        int sx = GAME_W, sw = SIDEBAR;
+        int px = sx + 12;
+        int maxW = sw - 24;
 
-        g2.setPaint(new GradientPaint(sx,0,new Color(10,13,32),sx + sw,HEIGHT,new Color(14,18,44)));
-        g2.fillRect(sx,0,sw,HEIGHT);
+        // Save original clip
+        Shape origClip = g2.getClip();
+        // Clip all rendering to sidebar bounds
+        g2.setClip(sx, 0, sw, HEIGHT);
 
+        // Background
+        g2.setPaint(new GradientPaint(sx,0,new Color(10,13,32),sx+sw,HEIGHT,new Color(14,18,44)));
+        g2.fillRect(sx, 0, sw, HEIGHT);
         g2.setColor(new Color(50,105,252,195));
-        if (borderStyle == 1) {
-            g2.setStroke(new BasicStroke(4f));
-            g2.drawLine(sx,0,sx,HEIGHT);
-            g2.setColor(new Color(25,55,180,130));
-            g2.drawLine(sx + 5,0,sx + 5,HEIGHT);
-        } else if (borderStyle == 0) {
-            g2.setStroke(new BasicStroke(2f));
-            g2.drawLine(sx,0,sx,HEIGHT);
-        }
+        g2.setStroke(new BasicStroke(2f));
+        g2.drawLine(sx, 0, sx, HEIGHT);
         g2.setStroke(new BasicStroke(1f));
 
-        // ── fixed bottom controls bar ────────────────────────────────
-        int controlsY = HEIGHT - 90;
-        sbDiv(g2,sx,sw,controlsY);
-        g2.setColor(new Color(95,108,152)); g2.setFont(new Font("Arial",Font.PLAIN,11));
-        int cy2 = controlsY + 14;
-        for (String s : new String[]{"WASD/Arrows   Move","SPACE          Shoot","ESC            Options","P              Pause"}) {
-            g2.drawString(s, px, cy2);
-            cy2 += 14;
-        }
+        // Controls strip at bottom
+        int ctrlH = 68;
+        int ctrlY = HEIGHT - ctrlH;
+        g2.setColor(new Color(20,25,55,210));
+        g2.fillRect(sx+1, ctrlY, sw-1, ctrlH);
+        g2.setColor(new Color(46,56,108,160));
+        g2.drawLine(sx+8, ctrlY, sx+sw-8, ctrlY);
+        g2.setColor(new Color(65,80,122));
+        g2.setFont(new Font("Arial", Font.PLAIN, 10));
+        int cy = ctrlY + 11;
+        g2.drawString("WASD/Arrows Move",    px, cy); cy += 12;
+        g2.drawString("SPACE Shoot",         px, cy); cy += 12;
+        g2.drawString("ESC Options",         px, cy); cy += 12;
+        g2.drawString("P/F11 Pause/FS",      px, cy);
 
-        // ── scrollable content area ──────────────────────────────────
-        int maxPy = controlsY - 6;  // don't draw past controls
-        int py = TOP_BAR + 18;
+        // Content area runs from below the top-bar to above the controls strip
+        int py = TOP_BAR + 8;
+        int maxPy = ctrlY - 6;
 
-        sbLbl(g2,"LEVEL",px,py); py += 18;
+        // helper: draw a section label (small caps style) and return new py
+        // LEVEL
+        sbLbl(g2, "LEVEL", px, py); py += 18;
         g2.setColor(new Color(255,212,65));
-        g2.setFont(new Font("Arial",Font.BOLD,24));
-        g2.drawString(level + " / " + MAX_LEVEL, px, py); py += 26;
-
+        g2.setFont(new Font("Arial", Font.BOLD, 18));
+        String lvlTxt = fitText(g2, level + " / " + MAX_LEVEL, maxW);
+        g2.drawString(lvlTxt, px, py); py += 12;
         g2.setColor(new Color(180,180,255));
-        g2.setFont(new Font("Arial", Font.BOLD, 12));
-        g2.drawString(getDifficultyName(level), px, py); py += 16;
-
+        g2.setFont(new Font("Arial", Font.BOLD, 10));
+        String diffTxt = fitText(g2, getDifficultyName(level), maxW);
+        g2.drawString(diffTxt, px, py + 8); py += 16;
         if (level == 5 || level == 10 || level == 15) {
-            String bl = level == 5 ? "!! MINI-BOSS" : level == 10 ? "** ELITE BOSS" : "!! FINAL BOSS";
+            String bl = level == 5 ? "MINI-BOSS" : level == 10 ? "ELITE BOSS" : "FINAL BOSS";
             g2.setColor(new Color(252,160,40));
-            g2.setFont(new Font("Arial",Font.BOLD,12));
-            g2.drawString(bl, px, py); py += 16;
+            g2.setFont(new Font("Arial", Font.BOLD, 10));
+            String bossTxt = fitText(g2, bl, maxW);
+            g2.drawString(bossTxt, px, py + 2);
+            py += 16;
         }
-        if (py >= maxPy) return;
-        sbDiv(g2,sx,sw,py); py += 12;
+        if (py >= maxPy) return; sbDiv(g2, sx, sw, py); py += 8;
 
-        sbLbl(g2,"SCORE",px,py); py += 16;
+        // SCORE
+        sbLbl(g2, "SCORE", px, py); py += 18;
         g2.setColor(new Color(95,252,115));
-        g2.setFont(new Font("Arial",Font.BOLD,22));
-        g2.drawString(String.valueOf(score), px, py); py += 26;
-        if (py >= maxPy) return;
-        sbDiv(g2,sx,sw,py); py += 12;
+        g2.setFont(new Font("Arial", Font.BOLD, 18));
+        String scoreTxt = fitText(g2, String.valueOf(score), maxW);
+        g2.drawString(scoreTxt, px, py); py += 12;
+        if (py >= maxPy) return; sbDiv(g2, sx, sw, py); py += 8;
 
-        sbLbl(g2,"HEALTH",px,py); py += 16;
-        int bw = sw - 28;
-        float hp = player != null ? (float) player.health / player.maxHealth : 0f;
+        // HEALTH
+        sbLbl(g2, "HEALTH", px, py); py += 18;
+        float hp = player != null ? (float)player.health / player.maxHealth : 0f;
         g2.setColor(new Color(65,12,12));
-        g2.fillRoundRect(px,py,bw,14,6,6);
+        g2.fillRoundRect(px, py, maxW, 14, 4, 4);
         Color hc = hp > 0.5f ? new Color(46,205,46) : hp > 0.25f ? new Color(245,165,0) : new Color(235,28,28);
         g2.setColor(hc);
-        g2.fillRoundRect(px,py,(int)(bw * Math.max(0,hp)),14,6,6);
-        g2.setColor(new Color(255,255,255,65));
-        g2.drawRoundRect(px,py,bw,14,6,6);
+        g2.fillRoundRect(px, py, (int)(maxW * Math.max(0,hp)), 14, 4, 4);
+        g2.setColor(new Color(255,255,255,55));
+        g2.drawRoundRect(px, py, maxW, 14, 4, 4);
         g2.setColor(Color.WHITE);
-        g2.setFont(new Font("Arial",Font.BOLD,11));
-        g2.drawString((player != null ? Math.max(0,player.health) : 0) + " / " + (player != null ? player.maxHealth : 100) + " HP", px + 3, py + 11);
-        py += 26;
-        if (py >= maxPy) return;
-        sbDiv(g2,sx,sw,py); py += 12;
+        g2.setFont(new Font("Arial", Font.BOLD, 10));
+        String hpTxt = (player!=null?Math.max(0,player.health):0)+" / "+(player!=null?player.maxHealth:100)+" HP";
+        String hpFit = fitText(g2, hpTxt, maxW - 6);
+        g2.drawString(hpFit, px+3, py+11);
+        py += 28;
+        if (py >= maxPy) return; sbDiv(g2, sx, sw, py); py += 8;
 
-        sbLbl(g2,"QUOTA",px,py); py += 16;
+        // QUOTA
+        sbLbl(g2, "QUOTA", px, py); py += 18;
         for (int i = 0; i < quotaRequired; i++) {
             int col = i % 10, row = i / 10;
             g2.setColor(i < quotaKilled ? new Color(46,188,46) : new Color(46,46,72));
-            g2.fillOval(px + col * 17, py + row * 18, 12, 12);
+            g2.fillOval(px + col*15, py + row*15, 10, 10);
             if (i < quotaKilled) {
                 g2.setColor(new Color(175,252,175));
-                g2.setFont(new Font("Arial",Font.BOLD,8));
-                g2.drawString("v", px + col * 17 + 2, py + row * 18 + 9);
+                g2.setFont(new Font("Arial", Font.BOLD, 8));
+                g2.drawString("v", px + col*15+2, py + row*15+9);
             }
         }
-        int quotaRows = (quotaRequired - 1) / 10 + 1;
-        py += quotaRows * 18 + 4;
+        int quotaRows = Math.max(1,(quotaRequired-1)/10+1);
+        py += quotaRows*15 + 6;
         g2.setColor(new Color(165,165,165));
-        g2.setFont(new Font("Arial",Font.PLAIN,12));
-        g2.drawString(quotaKilled + " / " + quotaRequired + " kills", px, py); py += 22;
-        if (py >= maxPy) return;
-        sbDiv(g2,sx,sw,py); py += 12;
+        g2.setFont(new Font("Arial", Font.PLAIN, 10));
+        String quotaTxt = fitText(g2, quotaKilled + " / " + quotaRequired + " kills", maxW);
+        g2.drawString(quotaTxt, px, py); py += 14;
+        if (py >= maxPy) return; sbDiv(g2, sx, sw, py); py += 8;
 
-        // ── Retries ──────────────────────────────────────────────────
-        sbLbl(g2,"RETRIES",px,py); py += 16;
+        // RETRIES
+        sbLbl(g2, "RETRIES", px, py); py += 18;
         for (int i = 0; i < 3; i++) {
             boolean active = i < retriesLeft;
             g2.setColor(active ? new Color(255,90,90) : new Color(55,30,30));
-            g2.fillRoundRect(px + i * 20, py - 12, 14, 14, 5, 5);
-            if (!active) {
-                g2.setColor(new Color(100,55,55));
-                g2.setStroke(new BasicStroke(1f));
-                g2.drawRoundRect(px + i * 20, py - 12, 14, 14, 5, 5);
-            }
+            g2.fillRoundRect(px + i*19, py-12, 14, 14, 3, 3);
+            if (!active) { g2.setColor(new Color(100,55,55)); g2.drawRoundRect(px+i*19, py-12, 14, 14, 3, 3); }
         }
-        py += 10;
-        if (py >= maxPy) return;
-        sbDiv(g2,sx,sw,py); py += 12;
+        py += 12;
+        if (py >= maxPy) return; sbDiv(g2, sx, sw, py); py += 8;
 
-        sbLbl(g2,"AMMO",px,py); py += 16;
+        // AMMO
+        sbLbl(g2, "AMMO", px, py); py += 18;
         g2.setColor(new Color(220,235,255));
-        g2.setFont(new Font("Arial",Font.BOLD,18));
-        String ammoText = playerReloadTimer > 0 ? "Reloading..." : (playerAmmo + " / " + playerMagazineSize);
-        g2.drawString(ammoText, px, py); py += 20;
+        g2.setFont(new Font("Arial", Font.BOLD, 16));
         if (playerReloadTimer > 0) {
             g2.setColor(new Color(255,185,45));
-            g2.setFont(new Font("Arial",Font.PLAIN,12));
-            g2.drawString(String.format("%.1fs", playerReloadTimer / 60.0), px, py);
+            String reloadTxt = fitText(g2, "Reloading...", maxW);
+            g2.drawString(reloadTxt, px, py);
+            g2.setFont(new Font("Arial", Font.PLAIN, 10));
+            String timeTxt = fitText(g2, String.format("%.1fs left", playerReloadTimer/60.0), maxW);
+            g2.drawString(timeTxt, px, py+14);
             py += 16;
+        } else {
+            String ammoTxt = fitText(g2, playerAmmo + " / " + playerMagazineSize, maxW);
+            g2.drawString(ammoTxt, px, py);
+            py += 10;
         }
-        if (py >= maxPy) return;
-        sbDiv(g2,sx,sw,py); py += 12;
+        py += 10;
+        if (py >= maxPy) return; sbDiv(g2, sx, sw, py); py += 8;
 
-        sbLbl(g2,"TIME",px,py); py += 14;
-        Color tc = levelTimeRemaining > 20 ? new Color(85,190,255) : levelTimeRemaining > 10 ? new Color(255,185,45) : new Color(252,50,50);
+        // TIME
+        sbLbl(g2, "TIME", px, py); py += 18;
+        Color tc = levelTimeRemaining > 20 ? new Color(85,190,255)
+                 : levelTimeRemaining > 10 ? new Color(255,185,45)
+                 : new Color(252,50,50);
         g2.setColor(tc);
-        g2.setFont(new Font("Arial",Font.BOLD,30));
-        g2.drawString(String.format("%d:%02d", levelTimeRemaining / 60, levelTimeRemaining % 60), px, py + 24); py += 36;
+        g2.setFont(new Font("Arial", Font.BOLD, 20));
+        String timeTxt = fitText(g2, String.format("%d:%02d", levelTimeRemaining/60, levelTimeRemaining%60), maxW);
+        g2.drawString(timeTxt, px, py+3);
+        py += 28;
 
-        if (level == 5 || level == 10 || level == 15) {
-            if (py >= maxPy) return;
-            sbDiv(g2,sx,sw,py); py += 12;
+        // BOSS STATUS
+        if ((level == 5 || level == 10 || level == 15) && py + 30 < maxPy) {
+            sbDiv(g2, sx, sw, py); py += 7;
             boolean locked = enemies.stream().anyMatch(e -> e.isBoss && !e.bossUnlocked);
             String bossLabel = level == 5 ? "MINI-BOSS" : level == 10 ? "ELITE BOSS" : "FINAL BOSS";
-            sbLbl(g2, bossLabel, px, py); py += 16;
+            sbLbl(g2, bossLabel, px, py); py += 13;
             if (py < maxPy) {
                 if (locked) {
-                    g2.setColor(new Color(252,85,85)); g2.setFont(new Font("Arial",Font.BOLD,13));
+                    g2.setColor(new Color(252,85,85));
+                    g2.setFont(new Font("Arial", Font.BOLD, 11));
                     g2.drawString("LOCKED", px, py);
-                    g2.setColor(new Color(145,145,145)); g2.setFont(new Font("Arial",Font.PLAIN,11));
-                    if (py + 14 < maxPy) g2.drawString("Clear minions first", px, py + 14);
+                    if (py+12 < maxPy) { g2.setColor(new Color(145,145,145)); g2.setFont(new Font("Arial",Font.PLAIN,10)); g2.drawString("Kill minions first", px, py+12); }
                 } else {
-                    g2.setColor(new Color(252,48,48)); g2.setFont(new Font("Arial",Font.BOLD,13));
+                    g2.setColor(new Color(252,48,48));
+                    g2.setFont(new Font("Arial", Font.BOLD, 11));
                     g2.drawString("UNLOCKED!", px, py);
                 }
             }
         }
+
+        // Restore original clip
+        g2.setClip(origClip);
     }
 
     private String fitText(Graphics2D g2, String text, int maxWidth) {
@@ -3086,7 +3502,7 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         g2.setStroke(new BasicStroke(1f));
 
         int mapCenterX = GAME_W / 2;
-        int sidebarX = GAME_W;
+        int sidebarX   = GAME_W;
 
         g2.setColor(new Color(100,170,255));
         g2.setFont(new Font("Arial",Font.BOLD,15));
@@ -3106,11 +3522,10 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         String lvlStr = "LVL " + level + " / " + MAX_LEVEL + "  " + getDifficultyName(level);
         String bossTag = "";
         switch (level) {
-            case 5 -> bossTag = "  !! MINI-BOSS";
-            case 10 -> bossTag = "  ** ELITE BOSS";
+            case 5  -> bossTag = "  !! MINI-BOSS";
+            case 10 -> bossTag = "  !! ELITE BOSS";
             case 15 -> bossTag = "  !! FINAL BOSS";
         }
-
         g2.setColor(new Color(255,212,65));
         g2.setFont(new Font("Arial",Font.BOLD,16));
         FontMetrics fm = g2.getFontMetrics();
@@ -3120,17 +3535,44 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         g2.setColor(new Color(50,80,150));
         g2.drawLine(sidebarX, 4, sidebarX, TOP_BAR - 4);
 
-        g2.setColor(new Color(150,160,190));
-        g2.setFont(new Font("Arial",Font.PLAIN,11));
-        g2.drawString("SCORE", sidebarX + 14, 14);
-        g2.setColor(new Color(95,252,115));
-        g2.setFont(new Font("Arial",Font.BOLD,15));
-        g2.drawString(String.valueOf(score), sidebarX + 14, 28);
+        // ── FULLSCREEN button — top-right of game top-bar, like a title-bar button ──
+        int fsBtnW = 34, fsBtnH = 22;
+        int fsBtnX = WIDTH - fsBtnW - 6;
+        int fsBtnY = (TOP_BAR - fsBtnH) / 2;
+        fsBtn.setBounds(fsBtnX, fsBtnY, fsBtnW, fsBtnH);
+        boolean fsHover = fsBtn.contains(mousePos);
+
+        // Background: dark like a title-bar button, blue-ish on hover
+        g2.setColor(fsHover ? new Color(50,100,220,230) : new Color(22,30,65,200));
+        g2.fillRoundRect(fsBtnX, fsBtnY, fsBtnW, fsBtnH, 4, 4);
+        g2.setColor(fsHover ? new Color(120,170,255,200) : new Color(55,80,160,180));
+        g2.setStroke(new BasicStroke(1f));
+        g2.drawRoundRect(fsBtnX, fsBtnY, fsBtnW, fsBtnH, 4, 4);
+
+        // Corner-bracket icon (expand or compress)
+        g2.setColor(fsHover ? Color.WHITE : new Color(140,175,255));
+        g2.setStroke(new BasicStroke(2f));
+        int ix = fsBtnX + 6, iy = fsBtnY + 5, iw = fsBtnW - 12, ih = fsBtnH - 10;
+        int mm = 4;
+        if (fullscreen) {
+            // Compress arrows — pointing inward
+            g2.drawLine(ix,      iy+mm,   ix+mm,   iy+mm);   g2.drawLine(ix+mm,   iy,      ix+mm,   iy+mm);
+            g2.drawLine(ix+iw,   iy+mm,   ix+iw-mm,iy+mm);   g2.drawLine(ix+iw-mm,iy,      ix+iw-mm,iy+mm);
+            g2.drawLine(ix,      iy+ih-mm,ix+mm,   iy+ih-mm);g2.drawLine(ix+mm,   iy+ih,   ix+mm,   iy+ih-mm);
+            g2.drawLine(ix+iw,   iy+ih-mm,ix+iw-mm,iy+ih-mm);g2.drawLine(ix+iw-mm,iy+ih,   ix+iw-mm,iy+ih-mm);
+        } else {
+            // Expand arrows — pointing outward
+            g2.drawLine(ix,      iy,      ix+mm,   iy);      g2.drawLine(ix,      iy,      ix,      iy+mm);
+            g2.drawLine(ix+iw,   iy,      ix+iw-mm,iy);      g2.drawLine(ix+iw,   iy,      ix+iw,   iy+mm);
+            g2.drawLine(ix,      iy+ih,   ix+mm,   iy+ih);   g2.drawLine(ix,      iy+ih,   ix,      iy+ih-mm);
+            g2.drawLine(ix+iw,   iy+ih,   ix+iw-mm,iy+ih);   g2.drawLine(ix+iw,   iy+ih,   ix+iw,   iy+ih-mm);
+        }
+        g2.setStroke(new BasicStroke(1f));
     }
 
     private void sbLbl(Graphics2D g2, String t, int x, int y) {
         g2.setColor(new Color(85,120,205));
-        g2.setFont(new Font("Arial",Font.BOLD,10));
+        g2.setFont(new Font("Arial",Font.BOLD,12));
         g2.drawString(t,x,y);
     }
 
@@ -3221,7 +3663,8 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         for (int x = 0; x < WIDTH; x += 50) g2.drawLine(x,0,x,HEIGHT);
         for (int y = 0; y < HEIGHT; y += 50) g2.drawLine(0,y,WIDTH,y);
 
-        int cw = 680, ch = 520, cx = (WIDTH - cw) / 2, cy = (HEIGHT - ch) / 2;
+        // Panel — wide enough so no text clips
+        int cw = 720, ch = 500, cx = (WIDTH - cw) / 2, cy = (HEIGHT - ch) / 2;
         g2.setColor(new Color(10,16,46,248));
         g2.fillRoundRect(cx,cy,cw,ch,22,22);
         g2.setColor(new Color(55,115,255));
@@ -3229,110 +3672,125 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         g2.drawRoundRect(cx,cy,cw,ch,22,22);
         g2.setStroke(new BasicStroke(1f));
 
+        // ── Title ─────────────────────────────────────────────────────
         g2.setColor(Color.WHITE);
-        g2.setFont(new Font("Arial",Font.BOLD,38));
+        g2.setFont(new Font("Arial",Font.BOLD,34));
         FontMetrics fm = g2.getFontMetrics();
         String title = "SETTINGS";
-        g2.drawString(title, cx + (cw - fm.stringWidth(title)) / 2, cy + 56);
+        g2.drawString(title, cx + (cw - fm.stringWidth(title)) / 2, cy + 50);
         g2.setColor(new Color(55,115,255,135));
-        g2.drawLine(cx + 30,cy + 68,cx + cw - 30,cy + 68);
+        g2.drawLine(cx + 30, cy + 62, cx + cw - 30, cy + 62);
 
-        int iy = cy + 100;
+        // Row geometry
+        int rowX  = cx + 36;
+        int rowW  = cw - 72;
+        int iy    = cy + 78;
+        final int ROW_H = 36, ROW_GAP = 5;
+
+        // ── CONTROLS label ────────────────────────────────────────────
         g2.setColor(new Color(85,120,205));
-        g2.setFont(new Font("Arial",Font.BOLD,12));
-        g2.drawString("CONTROLS", cx + 40, iy); iy += 20;
+        g2.setFont(new Font("Arial",Font.BOLD,11));
+        g2.drawString("CONTROLS", rowX, iy); iy += 12;
 
+        // Control rows
         String[][] ctrlRows = {
-                {"MOVE","W / A / S / D  or  Arrow Keys"},
-                {"SHOOT","SPACE"},
-                {"PAUSE","P"},
-                {"OPTIONS","ESC"}
+            {"MOVE",       "W / A / S / D  or  Arrow Keys"},
+            {"SHOOT",      "SPACE"},
+            {"PAUSE",      "P"},
+            {"OPTIONS",    "ESC"},
+            {"FULLSCREEN", "F11"},
         };
-
         for (String[] cr : ctrlRows) {
             g2.setColor(new Color(28,42,100));
-            g2.fillRoundRect(cx + 38, iy - 2, cw - 76, 32, 8, 8);
+            g2.fillRoundRect(rowX, iy, rowW, ROW_H, 8, 8);
             g2.setColor(new Color(55,85,180,80));
             g2.setStroke(new BasicStroke(1f));
-            g2.drawRoundRect(cx + 38, iy - 2, cw - 76, 32, 8, 8);
+            g2.drawRoundRect(rowX, iy, rowW, ROW_H, 8, 8);
 
             g2.setColor(new Color(130,155,220));
-            g2.setFont(new Font("Arial",Font.BOLD,14));
-            g2.drawString(cr[0], cx + 54, iy + 18);
+            g2.setFont(new Font("Arial",Font.BOLD,13));
+            g2.drawString(cr[0], rowX + 14, iy + 23);
 
-            g2.setColor(new Color(200,215,255));
-            g2.setFont(new Font("Arial",Font.PLAIN,14));
+            g2.setColor(new Color(210,225,255));
+            g2.setFont(new Font("Arial",Font.PLAIN,13));
             fm = g2.getFontMetrics();
-            g2.drawString(cr[1], cx + cw - 38 - fm.stringWidth(cr[1]), iy + 18);
-            iy += 40;
+            g2.drawString(cr[1], rowX + rowW - 12 - fm.stringWidth(cr[1]), iy + 23);
+            iy += ROW_H + ROW_GAP;
         }
 
-        iy += 10;
+        // Divider
+        iy += 6;
         g2.setColor(new Color(55,115,255,60));
-        g2.drawLine(cx + 30,iy,cx + cw - 30,iy); iy += 20;
+        g2.drawLine(cx + 30, iy, cx + cw - 30, iy);
+        iy += 12;
 
+        // ── SIDEBAR BORDER ────────────────────────────────────────────
+        final int OPT_H = 48;
         boolean selBorder = (settingsCursor == 2);
         g2.setColor(selBorder ? new Color(28,52,118) : new Color(18,28,68));
-        g2.fillRoundRect(cx + 38, iy - 2, cw - 76, 44, 10, 10);
+        g2.fillRoundRect(rowX, iy, rowW, OPT_H, 10, 10);
         if (selBorder) {
             g2.setColor(new Color(55,115,255));
             g2.setStroke(new BasicStroke(1.8f));
-            g2.drawRoundRect(cx + 38, iy - 2, cw - 76, 44, 10, 10);
+            g2.drawRoundRect(rowX, iy, rowW, OPT_H, 10, 10);
             g2.setStroke(new BasicStroke(1f));
         }
         g2.setColor(selBorder ? Color.WHITE : new Color(165,185,240));
-        g2.setFont(new Font("Arial",Font.BOLD,16));
-        g2.drawString("SIDEBAR BORDER", cx + 54, iy + 27);
+        g2.setFont(new Font("Arial",Font.BOLD,14));
+        g2.drawString("SIDEBAR BORDER", rowX + 14, iy + 20);
+        g2.setColor(new Color(100,170,255));
+        g2.setFont(new Font("Arial",Font.PLAIN,10));
+        g2.drawString("ENTER to cycle", rowX + 14, iy + 36);
 
+        // Value pill — right-aligned
         String bval = BORDER_NAMES[borderStyle];
-        g2.setColor(new Color(46,98,228));
-        fm = g2.getFontMetrics(g2.getFont());
-        int pvw = fm.stringWidth(bval) + 24;
-        int pvx = cx + cw - 38 - pvw;
-        g2.fillRoundRect(pvx, iy + 8, pvw, 24, 8, 8);
-        g2.setColor(Color.WHITE);
-        g2.setFont(new Font("Arial",Font.BOLD,13));
+        g2.setFont(new Font("Arial",Font.BOLD,12));
         fm = g2.getFontMetrics();
-        g2.drawString(bval, pvx + (pvw - fm.stringWidth(bval)) / 2, iy + 24);
-        if (selBorder) {
-            g2.setColor(new Color(100,170,255));
-            g2.setFont(new Font("Arial",Font.PLAIN,11));
-            g2.drawString("ENTER to cycle", cx + cw - 38 - 104, iy + 44);
-        }
-        iy += 54;
+        int pvw = fm.stringWidth(bval) + 22;
+        int pvx = rowX + rowW - pvw - 8;
+        g2.setColor(new Color(46,98,228));
+        g2.fillRoundRect(pvx, iy + 12, pvw, 22, 8, 8);
+        g2.setColor(Color.WHITE);
+        g2.drawString(bval, pvx + (pvw - fm.stringWidth(bval)) / 2, iy + 27);
+        iy += OPT_H + 8;
 
+        // ── RESET TO DEFAULT ──────────────────────────────────────────
         boolean selReset = (settingsCursor == 1);
         g2.setColor(selReset ? new Color(36,18,18) : new Color(22,14,14));
-        g2.fillRoundRect(cx + 38, iy - 2, cw - 76, 44, 10, 10);
+        g2.fillRoundRect(rowX, iy, rowW, OPT_H, 10, 10);
         if (selReset) {
             g2.setColor(new Color(210,60,60));
             g2.setStroke(new BasicStroke(1.8f));
-            g2.drawRoundRect(cx + 38, iy - 2, cw - 76, 44, 10, 10);
+            g2.drawRoundRect(rowX, iy, rowW, OPT_H, 10, 10);
             g2.setStroke(new BasicStroke(1f));
         }
         g2.setColor(selReset ? new Color(255,120,120) : new Color(200,80,80));
-        g2.setFont(new Font("Arial",Font.BOLD,16));
-        g2.drawString("RESET TO DEFAULT", cx + 54, iy + 27);
-        iy += 54;
+        g2.setFont(new Font("Arial",Font.BOLD,14));
+        g2.drawString("RESET TO DEFAULT", rowX + 14, iy + 28);
+        iy += OPT_H + 8;
 
+        // ── BACK TO PAUSE ─────────────────────────────────────────────
         boolean selExit = (settingsCursor == 0);
         g2.setColor(selExit ? new Color(26,36,76) : new Color(16,22,52));
-        g2.fillRoundRect(cx + 38, iy - 2, cw - 76, 44, 10, 10);
+        g2.fillRoundRect(rowX, iy, rowW, OPT_H, 10, 10);
         if (selExit) {
             g2.setColor(new Color(95,150,255));
             g2.setStroke(new BasicStroke(1.8f));
-            g2.drawRoundRect(cx + 38, iy - 2, cw - 76, 44, 10, 10);
+            g2.drawRoundRect(rowX, iy, rowW, OPT_H, 10, 10);
             g2.setStroke(new BasicStroke(1f));
         }
         g2.setColor(selExit ? Color.WHITE : new Color(125,155,230));
-        g2.setFont(new Font("Arial",Font.BOLD,16));
-        g2.drawString("<-- BACK TO PAUSE", cx + 54, iy + 27);
+        g2.setFont(new Font("Arial",Font.BOLD,14));
+        g2.drawString("<-- BACK TO PAUSE", rowX + 14, iy + 28);
 
+        // ── Bottom hint (two short lines instead of one long one) ─────
         g2.setColor(new Color(70,90,150));
-        g2.setFont(new Font("Arial",Font.PLAIN,13));
-        String hint = "W / S - navigate     ENTER - confirm     ESC - back";
+        g2.setFont(new Font("Arial",Font.PLAIN,12));
         fm = g2.getFontMetrics();
-        g2.drawString(hint, cx + (cw - fm.stringWidth(hint)) / 2, cy + ch - 18);
+        String h1 = "W / S  navigate       ENTER  confirm";
+        String h2 = "ESC  back to pause";
+        g2.drawString(h1, cx + (cw - fm.stringWidth(h1)) / 2, cy + ch - 28);
+        g2.drawString(h2, cx + (cw - fm.stringWidth(h2)) / 2, cy + ch - 12);
     }
 
     private void drawLevelCleared(Graphics2D g2) {
@@ -3373,7 +3831,7 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         g2.setFont(new Font("Arial",Font.BOLD,18));
         fm = g2.getFontMetrics();
         String hint = level < MAX_LEVEL
-                ? "Press E / ENTER to continue to Level " + (level + 1)
+                ? "Press E / ENTER to pick an upgrade card → Level " + (level + 1)
                 : "Press E / ENTER to see final results!";
         g2.drawString(hint, cx - fm.stringWidth(hint) / 2, cardY + cardH - 34);
     }
@@ -3530,31 +3988,57 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         g2.setColor(new Color(0, 0, 0, 215));
         g2.fillRect(0, 0, WIDTH, HEIGHT);
 
+        boolean isRare = cardSelectIsRare;
+
         // ── Header ──────────────────────────────────────────────────
-        g2.setColor(new Color(255,212,65));
-        g2.setFont(new Font("Arial", Font.BOLD, 36));
-        FontMetrics fm = g2.getFontMetrics();
-        String title = "BOSS DEFEATED!";
-        g2.drawString(title, (WIDTH - fm.stringWidth(title)) / 2, 72);
-
-        g2.setColor(new Color(135, 200, 255));
-        g2.setFont(new Font("Arial", Font.BOLD, 20));
-        fm = g2.getFontMetrics();
-        String sub = "Choose a Power Card  -  heading to Level " + (level + 1);
-        g2.drawString(sub, (WIDTH - fm.stringWidth(sub)) / 2, 104);
-
-        g2.setColor(new Color(80, 120, 200, 100));
-        g2.setFont(new Font("Arial", Font.PLAIN, 14));
-        fm = g2.getFontMetrics();
-        String keys = "Press  1  2  3  or click a card";
-        g2.drawString(keys, (WIDTH - fm.stringWidth(keys)) / 2, 128);
+        if (isRare) {
+            // Golden/rare header
+            g2.setPaint(new GradientPaint(0, 0, new Color(80, 40, 0), WIDTH, 0, new Color(60, 30, 0)));
+            g2.fillRect(0, 0, WIDTH, 140);
+            g2.setColor(new Color(255, 200, 40));
+            g2.setFont(new Font("Arial", Font.BOLD, 38));
+            FontMetrics fm = g2.getFontMetrics();
+            String title = "!  BOSS DEFEATED — RARE REWARD  !";
+            g2.drawString(title, (WIDTH - fm.stringWidth(title)) / 2, 58);
+            g2.setColor(new Color(255, 230, 120));
+            g2.setFont(new Font("Arial", Font.BOLD, 18));
+            fm = g2.getFontMetrics();
+            String sub = "Choose a RARE Power Card  —  heading to Level " + pendingNextLevel;
+            g2.drawString(sub, (WIDTH - fm.stringWidth(sub)) / 2, 90);
+            g2.setColor(new Color(255, 180, 40, 160));
+            g2.setStroke(new java.awt.BasicStroke(2f));
+            g2.drawLine(60, 104, WIDTH - 60, 104);
+            g2.setStroke(new java.awt.BasicStroke(1f));
+            g2.setColor(new Color(255, 200, 80, 140));
+            g2.setFont(new Font("Arial", Font.PLAIN, 14));
+            fm = g2.getFontMetrics();
+            String keys = "Press  1  2  3  or click a card";
+            g2.drawString(keys, (WIDTH - fm.stringWidth(keys)) / 2, 124);
+        } else {
+            // Standard blue header
+            g2.setColor(new Color(100, 180, 255));
+            g2.setFont(new Font("Arial", Font.BOLD, 32));
+            FontMetrics fm = g2.getFontMetrics();
+            String title = "LEVEL " + level + " CLEARED — CHOOSE AN UPGRADE";
+            g2.drawString(title, (WIDTH - fm.stringWidth(title)) / 2, 60);
+            g2.setColor(new Color(135, 200, 255));
+            g2.setFont(new Font("Arial", Font.BOLD, 18));
+            fm = g2.getFontMetrics();
+            String sub = "Heading to Level " + pendingNextLevel;
+            g2.drawString(sub, (WIDTH - fm.stringWidth(sub)) / 2, 90);
+            g2.setColor(new Color(80, 120, 200, 100));
+            g2.setFont(new Font("Arial", Font.PLAIN, 14));
+            fm = g2.getFontMetrics();
+            String keys = "Press  1  2  3  or click a card";
+            g2.drawString(keys, (WIDTH - fm.stringWidth(keys)) / 2, 114);
+        }
 
         // ── Current stats bar ────────────────────────────────────────
         int statsY = 148;
         g2.setColor(new Color(14, 22, 58, 200));
         g2.fillRoundRect(WIDTH/2 - 380, statsY, 760, 36, 10, 10);
         g2.setColor(new Color(50, 80, 160, 160));
-        g2.setStroke(new BasicStroke(1f));
+        g2.setStroke(new java.awt.BasicStroke(1f));
         g2.drawRoundRect(WIDTH/2 - 380, statsY, 760, 36, 10, 10);
 
         String[] statLabels = { "DMG", "HP", "SPD", "MAG", "RELOAD" };
@@ -3577,7 +4061,7 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         }
 
         // ── Three cards ──────────────────────────────────────────────
-        int cardW = 260, cardH = 230, gap = 28;
+        int cardW = 260, cardH = 290, gap = 28;
         int totalW = cardW * 3 + gap * 2;
         int startX = (WIDTH - totalW) / 2;
         int y = 200;
@@ -3591,56 +4075,86 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
             g2.setColor(new Color(0, 0, 0, 80));
             g2.fillRoundRect(r.x + 4, r.y + 4, r.width, r.height, 20, 20);
 
-            // Card background
-            if (hover) {
-                g2.setPaint(new GradientPaint(r.x, r.y, new Color(22,40,100), r.x, r.y+r.height, new Color(10,18,58)));
+            // Card background — golden tint for rare
+            if (isRare) {
+                if (hover) {
+                    g2.setPaint(new GradientPaint(r.x, r.y, new Color(60,44,4), r.x, r.y+r.height, new Color(28,18,2)));
+                } else {
+                    g2.setPaint(new GradientPaint(r.x, r.y, new Color(42,30,2), r.x, r.y+r.height, new Color(18,12,2)));
+                }
             } else {
-                g2.setColor(new Color(10, 18, 48));
+                if (hover) {
+                    g2.setPaint(new GradientPaint(r.x, r.y, new Color(22,40,100), r.x, r.y+r.height, new Color(10,18,58)));
+                } else {
+                    g2.setColor(new Color(10, 18, 48));
+                }
             }
             g2.fillRoundRect(r.x, r.y, r.width, r.height, 20, 20);
 
             // Border
-            g2.setColor(hover ? new Color(120, 180, 255) : new Color(55, 115, 255));
-            g2.setStroke(new BasicStroke(hover ? 3f : 2f));
+            if (isRare) {
+                g2.setColor(hover ? new Color(255, 230, 80) : new Color(200, 160, 40));
+            } else {
+                g2.setColor(hover ? new Color(120, 180, 255) : new Color(55, 115, 255));
+            }
+            g2.setStroke(new java.awt.BasicStroke(hover ? 3f : 2f));
             g2.drawRoundRect(r.x, r.y, r.width, r.height, 20, 20);
-            g2.setStroke(new BasicStroke(1f));
+            g2.setStroke(new java.awt.BasicStroke(1f));
 
             // Number badge
-            g2.setColor(new Color(255, 212, 65));
+            g2.setColor(isRare ? new Color(255, 220, 60) : new Color(255, 212, 65));
             g2.setFont(new Font("Arial", Font.BOLD, 22));
             g2.drawString(String.valueOf(i + 1), r.x + 16, r.y + 30);
 
             CardPower p = offeredCards.get(i);
 
+            // "RARE" badge on rare cards
+            if (isRare) {
+                g2.setColor(new Color(255, 180, 0, 200));
+                g2.fillRoundRect(r.x + r.width - 68, r.y + 10, 54, 20, 8, 8);
+                g2.setColor(new Color(20, 10, 0));
+                g2.setFont(new Font("Arial", Font.BOLD, 11));
+                g2.drawString("RARE", r.x + r.width - 58, r.y + 24);
+            }
+
             // Icon circle
-            g2.setColor(new Color(40, 80, 200, 120));
+            Color iconBg  = isRare ? new Color(120, 80, 0, 130) : new Color(40, 80, 200, 120);
+            Color iconRim = isRare ? new Color(255, 200, 60, 200) : new Color(100, 160, 255, 180);
+            g2.setColor(iconBg);
             g2.fillOval(r.x + r.width/2 - 26, r.y + 32, 52, 52);
-            g2.setColor(new Color(100, 160, 255, 180));
-            g2.setStroke(new BasicStroke(1.5f));
+            g2.setColor(iconRim);
+            g2.setStroke(new java.awt.BasicStroke(1.5f));
             g2.drawOval(r.x + r.width/2 - 26, r.y + 32, 52, 52);
-            g2.setStroke(new BasicStroke(1f));
+            g2.setStroke(new java.awt.BasicStroke(1f));
             g2.setColor(Color.WHITE);
             g2.setFont(new Font("Arial", Font.BOLD, 24));
-            fm = g2.getFontMetrics();
+            FontMetrics fm = g2.getFontMetrics();
             String icon = getCardIcon(p);
             g2.drawString(icon, r.x + r.width/2 - fm.stringWidth(icon)/2, r.y + 66);
 
             // Title
-            g2.setColor(Color.WHITE);
-            g2.setFont(new Font("Arial", Font.BOLD, 22));
-            drawCentered(g2, p.title, r.x + r.width / 2, r.y + 108);
+            g2.setColor(isRare ? new Color(255, 220, 100) : Color.WHITE);
+            g2.setFont(new Font("Arial", Font.BOLD, isRare ? 18 : 22));
+            drawCentered(g2, p.title.replace("RARE: ", ""), r.x + r.width / 2, r.y + 108);
 
             // Separator
-            g2.setColor(new Color(55, 115, 255, 80));
-            g2.drawLine(r.x + 20, r.y + 116, r.x + r.width - 20, r.y + 116);
+            g2.setColor(isRare ? new Color(200, 140, 40, 80) : new Color(55, 115, 255, 80));
+            g2.drawLine(r.x + 20, r.y + 118, r.x + r.width - 20, r.y + 118);
 
-            // Description
-            g2.setColor(new Color(180, 210, 255));
-            g2.setFont(new Font("Arial", Font.PLAIN, 16));
-            drawCentered(g2, p.desc, r.x + r.width / 2, r.y + 148);
+            // Description (main)
+            g2.setColor(isRare ? new Color(255, 220, 150) : new Color(180, 210, 255));
+            g2.setFont(new Font("Arial", Font.BOLD, 15));
+            drawCentered(g2, p.desc, r.x + r.width / 2, r.y + 150);
+
+            // Detail line (extra explanation)
+            g2.setColor(isRare ? new Color(210, 170, 90, 210) : new Color(120, 155, 220, 210));
+            g2.setFont(new Font("Arial", Font.PLAIN, 11));
+            drawWrappedCentered(g2, p.detail, r.x + r.width / 2, r.y + 175, r.width - 28);
 
             // Pick button
-            Color btnColor = hover ? new Color(55, 140, 255) : new Color(30, 70, 180);
+            Color btnColor = isRare
+                ? (hover ? new Color(200, 140, 20) : new Color(140, 90, 10))
+                : (hover ? new Color(55, 140, 255) : new Color(30, 70, 180));
             g2.setColor(btnColor);
             g2.fillRoundRect(r.x + 20, r.y + cardH - 44, r.width - 40, 30, 10, 10);
             g2.setColor(Color.WHITE);
@@ -3654,7 +4168,7 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
     private String getCardIcon(CardPower p) {
         return switch (p) {
             case CONTINUOUS_BULLET -> ">>>";
-            case FIVE_BULLET       -> "*5*";
+            case SIX_BULLET       -> "*6*";
             case TRIPLE_BULLET     -> "*3*";
             case QUICK_RELOAD      -> "<<";
             case MAG_PLUS          -> "+2";
@@ -3662,15 +4176,52 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
             case BIG_BULLETS       -> "( )";
             case DAMAGE_UP         -> "+!";
             case MAX_HP_UP         -> "+HP";
-            case FULL_REPAIR       -> "<3";
-            case ENGINE_BOOST      -> ">>>";
+            case BATTLE_MEDIC      -> "+50";
+            case HEAVY_SHOT        -> "HVY";
+            case ENGINE_BOOST      -> ">>";
             case SECOND_LIFE       -> "1UP";
+            // Rare
+            case RARE_DOUBLE_DAMAGE -> "x2!";
+            case RARE_DOUBLE_HP     -> "x2H";
+            case RARE_DOUBLE_SCORE  -> "x2$";
+            case RARE_GHOST_RELOAD  -> "x3M";
+            case RARE_SLOW_ENEMIES  -> "~~";
+            case RARE_RAPID_FIRE    -> "<<<";
         };
     }
 
     private void drawCentered(Graphics2D g2, String text, int cx, int y) {
         FontMetrics fm = g2.getFontMetrics();
         g2.drawString(text, cx - fm.stringWidth(text) / 2, y);
+    }
+
+    /** Draw text centred, wrapping to next line if wider than maxW. */
+    private void drawWrappedCentered(Graphics2D g2, String text, int cx, int y, int maxW) {
+        if (text == null || text.isEmpty()) return;
+        FontMetrics fm = g2.getFontMetrics();
+        if (fm.stringWidth(text) <= maxW) {
+            g2.drawString(text, cx - fm.stringWidth(text) / 2, y);
+            return;
+        }
+        // Split into words and wrap
+        String[] words = text.split(" ");
+        StringBuilder line = new StringBuilder();
+        int lineY = y;
+        for (String word : words) {
+            String test = line.isEmpty() ? word : line + " " + word;
+            if (fm.stringWidth(test) > maxW && !line.isEmpty()) {
+                String l = line.toString();
+                g2.drawString(l, cx - fm.stringWidth(l) / 2, lineY);
+                lineY += fm.getHeight() + 1;
+                line = new StringBuilder(word);
+            } else {
+                line = new StringBuilder(test);
+            }
+        }
+        if (!line.isEmpty()) {
+            String l = line.toString();
+            g2.drawString(l, cx - fm.stringWidth(l) / 2, lineY);
+        }
     }
 
     private void drawWalls(Graphics2D g2) {
@@ -3858,17 +4409,18 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
                 if (candidate.isEmpty()) {
                     nameErrorMsg = "Name cannot be empty!";
                 } else {
+                    // Check if name is already taken on the leaderboard
                     List<ScoreEntry> scores = LeaderboardManager.loadScores();
-                    ScoreEntry existing = scores.stream()
-                        .filter(s -> s.name.equalsIgnoreCase(candidate))
-                        .findFirst().orElse(null);
-                        
-                    playerName = candidate;
-                    if (existing != null) {
-                        score = existing.score;
-                        scoreAtLevelStart = existing.score;
+                    boolean nameTaken = scores.stream()
+                        .anyMatch(s -> s.name.equalsIgnoreCase(candidate));
+                    if (nameTaken) {
+                        // Block — must pick a different name
+                        nameErrorMsg = "Name already taken! Pick a different name.";
+                    } else {
+                        playerName = candidate;
+                        resetPlayerStats();
+                        gameState = GameState.TANK_SELECT;
                     }
-                    gameState = GameState.TANK_SELECT;
                 }
             } else if (k == KeyEvent.VK_ESCAPE) {
                 gameState = GameState.MENU;
@@ -3881,14 +4433,28 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
             repaint(); return;
         }
 
+
+        // LB_NAME_WARN state retired — name conflicts now blocked at name input
+
+
         if (gameState == GameState.TANK_SELECT) {
             switch (k) {
-                case KeyEvent.VK_ESCAPE -> gameState = GameState.NAME_INPUT;
+                case KeyEvent.VK_ESCAPE -> {
+                    // Go back to name input with blank field so user can retype
+                    playerName = "";
+                    nameErrorMsg = "";
+                    gameState = GameState.NAME_INPUT;
+                }
                 case KeyEvent.VK_LEFT,  KeyEvent.VK_A -> selectedTankDesign = (selectedTankDesign + 5) % 6;
                 case KeyEvent.VK_RIGHT, KeyEvent.VK_D -> selectedTankDesign = (selectedTankDesign + 1) % 6;
                 case KeyEvent.VK_UP    -> selectedTankDesign = (selectedTankDesign + 3) % 6;
                 case KeyEvent.VK_DOWN  -> selectedTankDesign = (selectedTankDesign + 3) % 6;
-                case KeyEvent.VK_ENTER, KeyEvent.VK_SPACE, KeyEvent.VK_E -> startLevel(1);
+                case KeyEvent.VK_ENTER, KeyEvent.VK_SPACE, KeyEvent.VK_E -> {
+                    pendingNextLevel = 1;
+                    cardSelectIsRare = false;
+                    rollRewardCards(false);
+                    gameState = GameState.CARD_SELECT;
+                }
                 default -> {}
             }
             repaint(); return;
@@ -3909,10 +4475,14 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         if (gameState == GameState.LEVEL_CLEARED) {
             if (k == KeyEvent.VK_ENTER || k == KeyEvent.VK_E) {
                 if (level >= MAX_LEVEL) {
+                    saveScore();
                     gameState = GameState.WIN;
                 } else {
-                    level++;
-                    startLevel(level);
+                    // Show common card pick before next level
+                    pendingNextLevel  = level + 1;
+                    cardSelectIsRare  = false;
+                    rollRewardCards(false);
+                    gameState = GameState.CARD_SELECT;
                 }
             }
             return;
@@ -3936,7 +4506,10 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         }
 
         if (gameState == GameState.WIN) {
-            if (k == KeyEvent.VK_M || k == KeyEvent.VK_R || k == KeyEvent.VK_ENTER || k == KeyEvent.VK_E) gameState = GameState.MENU;
+            if (k == KeyEvent.VK_M || k == KeyEvent.VK_R || k == KeyEvent.VK_ENTER || k == KeyEvent.VK_E) {
+                saveScore();
+                gameState = GameState.MENU;
+            }
             return;
         }
 
@@ -3982,7 +4555,7 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
                     startLevel(level); 
                 }
             }
-            case 2 -> { settingsOpen = true; settingsCursor = 2; } // re-using 2 as sidebar border or back? check settingsCursor logic
+            case 2 -> { settingsOpen = true; settingsCursor = 2; } // default to SIDEBAR BORDER row
             case 3 -> { 
                 // MAIN MENU - save score before leaving
                 saveScore();
@@ -4016,8 +4589,37 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         if (k == KeyEvent.VK_SPACE)                       shoot = false;
     }
 
+    // ── Fullscreen scale state (set by Main.toggleFullscreen) ────────
+    public static boolean fullscreen = false;
+    private double fsScaleX = 1.0, fsScaleY = 1.0;
+    private int    fsOffX   = 0,   fsOffY   = 0;
+
+    /** Called by Main after a fullscreen toggle so the panel knows the current scale. */
+    public void applyFullscreenScale(int screenW, int screenH) {
+        if (fullscreen) {
+            fsScaleX = (double) screenW / WIDTH;
+            fsScaleY = (double) screenH / HEIGHT;
+            // Use uniform scale (keep aspect ratio) and centre
+            double s = Math.min(fsScaleX, fsScaleY);
+            fsScaleX = s; fsScaleY = s;
+            fsOffX   = (int)((screenW - WIDTH  * s) / 2);
+            fsOffY   = (int)((screenH - HEIGHT * s) / 2);
+        } else {
+            fsScaleX = 1.0; fsScaleY = 1.0;
+            fsOffX = 0; fsOffY = 0;
+        }
+    }
+
+    /** Converts a screen-space point back to game-logic coords (for mouse input). */
+    public Point toGamePoint(Point screen) {
+        if (!fullscreen) return screen;
+        int gx = (int)((screen.x - fsOffX) / fsScaleX);
+        int gy = (int)((screen.y - fsOffY) / fsScaleY);
+        return new Point(gx, gy);
+    }
+
     @Override public void mouseMoved(MouseEvent e)   {
-        mousePos = e.getPoint();
+        mousePos = toGamePoint(e.getPoint());
         if (gameState == GameState.TANK_SELECT) {
             int cols = 3, cardW = 220, cardH = 220, gapX = 24, gapY = 20;
             int totalGridW = cols * cardW + (cols - 1) * gapX;
@@ -4033,17 +4635,41 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         }
         repaint();
     }
-    @Override public void mouseDragged(MouseEvent e) { mousePos = e.getPoint(); }
+    @Override public void mouseDragged(MouseEvent e) { mousePos = toGamePoint(e.getPoint()); }
 
     @Override
     public void mouseClicked(MouseEvent e) {
-        Point p = e.getPoint();
+        Point p = toGamePoint(e.getPoint());
+
+        // Fullscreen button — available from any game state
+        if (fsBtn.contains(p) && (gameState == GameState.PLAYING || gameState == GameState.PAUSED ||
+                gameState == GameState.LEVEL_CLEARED || gameState == GameState.GAME_OVER ||
+                gameState == GameState.WIN || gameState == GameState.CARD_SELECT)) {
+            Main.toggleFullscreen();
+            return;
+        }
 
         if (gameState == GameState.MENU) {
             if      (startBtn.contains(p))  { resetPlayerStats(); playerName = ""; gameState = GameState.NAME_INPUT; }
             else if (lboardBtn.contains(p)) gameState = GameState.LEADERBOARD;
             else if (instrBtn.contains(p))  gameState = GameState.INSTRUCTIONS;
             else if (exitBtn.contains(p))   System.exit(0);
+            return;
+        }
+
+        if (gameState == GameState.LB_NAME_WARN) {
+            if (lbWarnYesRect.contains(p)) {
+                lbExistingScore = 0;
+                resetPlayerStats();
+                gameState = GameState.TANK_SELECT;
+                repaint(); return;
+            }
+            if (lbWarnNoRect.contains(p)) {
+                lbExistingScore = 0;
+                nameErrorMsg = "";
+                gameState = GameState.NAME_INPUT;
+                repaint(); return;
+            }
             return;
         }
 
@@ -4058,7 +4684,14 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
             int btnW = 240, btnH = 46;
             int btnX = (WIDTH - btnW) / 2, btnY2 = py2 + ph - 74;
             Rectangle startBattleBtn = new Rectangle(btnX, btnY2, btnW, btnH);
-            if (startBattleBtn.contains(p)) { startLevel(1); repaint(); return; }
+            if (startBattleBtn.contains(p)) {
+                pendingNextLevel = 1;
+                cardSelectIsRare = false;
+                rollRewardCards(false);
+                gameState = GameState.CARD_SELECT;
+                repaint();
+                return;
+            }
 
             // Check tank cards
             for (int i = 0; i < 6; i++) {
@@ -4084,15 +4717,25 @@ public class GamePanel extends JPanel implements ActionListener, KeyListener, Mo
         }
 
         if (settingsOpen) {
-            int ch = 520, cy = (HEIGHT - ch) / 2;
-            int[] rowY = {cy + 398, cy + 344, cy + 290};
-            for (int i = 0; i < rowY.length; i++) {
-                if (p.y >= rowY[i] - 2 && p.y <= rowY[i] + 42) {
-                    settingsCursor = i;
-                    activateSettingsItem(i);
-                    repaint();
-                    return;
-                }
+            // Panel: ch=520, so cy = (HEIGHT-520)/2 = 90
+            int ch2 = 520, cy2 = (HEIGHT - ch2) / 2;
+            int cw2 = 680, cx2 = (WIDTH - cw2) / 2;
+            // Row positions (must match drawSettingsScreen):
+            // Controls label: cy2+84 (14px)  → 4 rows × (36+6) = 168px → ends at cy2+84+14+168 = cy2+266
+            // Divider: cy2+266+6 = cy2+272, then +14 → iy = cy2+286
+            // Border row: cy2+286, h=52 → ends cy2+338, +8 gap → iy = cy2+346
+            // Reset row:  cy2+346, h=44 → ends cy2+390, +8 gap → iy = cy2+398
+            // Back row:   cy2+398, h=44
+            int borderRowY = cy2 + 286;
+            int resetRowY  = cy2 + 346;
+            int backRowY   = cy2 + 398;
+            int rowW = cw2 - 76;
+            int rowX = cx2 + 38;
+
+            if (p.x >= rowX && p.x <= rowX + rowW) {
+                if (p.y >= backRowY   && p.y <= backRowY   + 44) { settingsCursor = 0; activateSettingsItem(0); repaint(); return; }
+                if (p.y >= resetRowY  && p.y <= resetRowY  + 44) { settingsCursor = 1; activateSettingsItem(1); repaint(); return; }
+                if (p.y >= borderRowY && p.y <= borderRowY + 52) { settingsCursor = 2; activateSettingsItem(2); repaint(); return; }
             }
             return;
         }

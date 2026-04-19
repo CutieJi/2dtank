@@ -1,7 +1,7 @@
-import javax.imageio.ImageIO;
-import java.io.File;
 import java.awt.image.BufferedImage;
+import java.io.File;
 import java.util.*;
+import javax.imageio.ImageIO;
 
 public class ImageAnalyzer {
     public static void main(String[] args) throws Exception {

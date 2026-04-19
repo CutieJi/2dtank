@@ -73,6 +73,6 @@ public class LeaderboardManager {
     /** Returns true if the given score qualifies for the top 10. */
     public static boolean qualifiesForTop10(int score) {
         List<ScoreEntry> scores = loadScores();
-        return scores.size() < MAX_ENTRIES || score > scores.get(scores.size() - 1).score;
+        return scores.size() < MAX_ENTRIES || score >= scores.get(scores.size() - 1).score;
     }
 }
